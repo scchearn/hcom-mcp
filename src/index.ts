@@ -8,7 +8,7 @@ import { registerLifecycleTools } from "./tools/lifecycle.js";
 import { isHcomAvailable } from "./hcom.js";
 
 const server = new McpServer({
-  name: "hcom-bootstrap",
+  name: "hcom-mcp",
   version: "0.1.0",
 });
 
@@ -30,7 +30,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("hcom-bootstrap MCP server running on stdio");
+  console.error("hcom-mcp MCP server running on stdio");
 }
 
 main().catch((err) => {

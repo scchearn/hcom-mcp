@@ -1,10 +1,10 @@
 {
-  "name": "mcp-server-hcom-bootstrap",
+  "name": "mcp-server-hcom-mcp",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "mcp-server-hcom-bootstrap": "dist/index.js"
+    "mcp-server-hcom-mcp": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

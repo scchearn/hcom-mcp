@@ -12,7 +12,7 @@ import {
 
 const GLOBAL_CONFIG_DIR = join(homedir(), ".hcom", "mcp");
 const GLOBAL_CONFIG_PATH = join(GLOBAL_CONFIG_DIR, "config.json");
-const WORKSPACE_CONFIG_FILENAME = ".hcom-bootstrap.json";
+const WORKSPACE_CONFIG_FILENAME = ".hcom-mcp.json";
 
 /**
  * Load and validate the global config from ~/.hcom/mcp/config.json
@@ -36,7 +36,7 @@ export function loadGlobalConfig(cwd: string): GlobalConfig {
 }
 
 /**
- * Load and validate the workspace-local config overlay from .hcom-bootstrap.json in cwd
+ * Load and validate the workspace-local config overlay from .hcom-mcp.json in cwd
  */
 export function loadWorkspaceConfig(cwd: string): WorkspaceConfig | null {
   const workspaceConfigPath = join(cwd, WORKSPACE_CONFIG_FILENAME);
