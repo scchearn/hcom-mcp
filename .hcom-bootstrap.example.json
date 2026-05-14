@@ -1,0 +1,11 @@
+{
+  "agentPresets": {
+    "local-reviewer": {
+      "name": "local-reviewer",
+      "harness": "opencode",
+      "model": "opencode-go/deepseek-v4-flash",
+      "headless": true,
+      "tag": "review"
+    }
+  }
+}

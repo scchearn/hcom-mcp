@@ -1,0 +1,30 @@
+{
+  "agentPresets": {
+    "research-assistant": {
+      "name": "research-assistant",
+      "harness": "opencode",
+      "model": "opencode/deepseek-v4-flash-free",
+      "headless": true,
+      "tag": "research"
+    },
+    "verifier": {
+      "name": "verifier",
+      "harness": "opencode",
+      "model": "ollama-cloud/glm-5.1",
+      "headless": true,
+      "tag": "verify"
+    }
+  },
+  "topologyPresets": {
+    "research-squad": {
+      "name": "research-squad",
+      "roles": [
+        { "role": "researcher-1", "preset": "research-assistant" },
+        { "role": "researcher-2", "preset": "research-assistant" },
+        { "role": "researcher-3", "preset": "research-assistant" },
+        { "role": "verifier", "preset": "verifier" }
+      ],
+      "threadPrefix": "research-squad"
+    }
+  }
+}
