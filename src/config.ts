@@ -10,12 +10,12 @@ import {
   type WorkspaceConfig,
 } from "./types.js";
 
-const GLOBAL_CONFIG_DIR = join(homedir(), ".config", "hcom-bootstrap");
+const GLOBAL_CONFIG_DIR = join(homedir(), ".hcom", "mcp");
 const GLOBAL_CONFIG_PATH = join(GLOBAL_CONFIG_DIR, "config.json");
 const WORKSPACE_CONFIG_FILENAME = ".hcom-bootstrap.json";
 
 /**
- * Load and validate the global config from ~/.config/hcom-bootstrap/config.json
+ * Load and validate the global config from ~/.hcom/mcp/config.json
  */
 export function loadGlobalConfig(cwd: string): GlobalConfig {
   let globalConfig: GlobalConfig = { agentPresets: {}, topologyPresets: {} };

@@ -8,7 +8,7 @@ import {
   type OwnershipState,
 } from "./types.js";
 
-const REGISTRY_DIR = join(homedir(), ".local", "share", "hcom-bootstrap");
+const REGISTRY_DIR = join(homedir(), ".hcom", "mcp");
 const REGISTRY_PATH = join(REGISTRY_DIR, "registry.json");
 
 interface Registry {
