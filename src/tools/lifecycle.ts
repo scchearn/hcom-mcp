@@ -1,11 +1,16 @@
 import { z } from "zod";
-import { execHcom } from "../hcom.js";
-import { getActiveRecords, updateRecordState, releaseRecord } from "../registry.js";
+import { execHcom, findLiveAgentByIdentifier, listHcomAgents } from "../hcom.js";
+import { getOwnedRecordsByWorkspace, updateRecordState, releaseRecord } from "../registry.js";
+
+function formatManagedNames(names: Array<string | undefined>) {
+  const filtered = names.filter(Boolean);
+  return filtered.length > 0 ? filtered.join(", ") : "none";
+}
 
 export function registerLifecycleTools(server: any) {
-  // hcom_stop
+  // stop
   server.tool(
-    "hcom_stop",
+    "stop",
     "Stop (disconnect) a managed agent",
     {
       name: z.string().describe("hcom agent name"),
@@ -13,18 +18,46 @@ export function registerLifecycleTools(server: any) {
     },
     async ({ name, workspace }: { name: string; workspace?: string }) => {
       const cwd = workspace ?? process.cwd();
-      const records = getActiveRecords(cwd);
+      const records = getOwnedRecordsByWorkspace(cwd);
       const owned = records.find((r) => r.hcomName === name);
+      const liveAgents = await listHcomAgents();
+      const liveAgent = findLiveAgentByIdentifier(name, liveAgents);
 
       if (!owned) {
         return {
-          content: [{ type: "text" as const, text: `Error: Agent "${name}" is not managed by this server.` }],
+          content: [{
+            type: "text" as const,
+            text: liveAgent
+              ? `Error: Agent "${name}" exists in hcom as "${liveAgent.name}" but is not managed by this server in workspace "${cwd}". Managed agents: ${formatManagedNames(records.map((record) => record.hcomName))}`
+              : `Error: Agent "${name}" was not found in the managed registry or live hcom for workspace "${cwd}". Managed agents: ${formatManagedNames(records.map((record) => record.hcomName))}`,
+          }],
+          isError: true,
+        };
+      }
+
+      if (owned.state === "managed_lost" && !liveAgent) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Error: Agent "${name}" has a stale managed record in workspace "${cwd}" but is no longer live in hcom.`,
+          }],
           isError: true,
         };
       }
 
       const result = await execHcom(["stop", name]);
       if (result.exitCode !== 0) {
+        if ((result.stderr || result.stdout).toLowerCase().includes("not found")) {
+          updateRecordState(owned.id, "managed_lost");
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Error: Agent "${name}" is no longer live in hcom. Its managed record was marked managed_lost.`,
+            }],
+            isError: true,
+          };
+        }
+
         return {
           content: [{ type: "text" as const, text: `Error stopping agent: ${result.stderr || result.stdout}` }],
           isError: true,
@@ -38,9 +71,9 @@ export function registerLifecycleTools(server: any) {
     }
   );
 
-  // hcom_kill
+  // kill
   server.tool(
-    "hcom_kill",
+    "kill",
     "Kill a managed agent and close its terminal pane",
     {
       name: z.string().describe("hcom agent name"),
@@ -48,18 +81,46 @@ export function registerLifecycleTools(server: any) {
     },
     async ({ name, workspace }: { name: string; workspace?: string }) => {
       const cwd = workspace ?? process.cwd();
-      const records = getActiveRecords(cwd);
+      const records = getOwnedRecordsByWorkspace(cwd);
       const owned = records.find((r) => r.hcomName === name);
+      const liveAgents = await listHcomAgents();
+      const liveAgent = findLiveAgentByIdentifier(name, liveAgents);
 
       if (!owned) {
         return {
-          content: [{ type: "text" as const, text: `Error: Agent "${name}" is not managed by this server.` }],
+          content: [{
+            type: "text" as const,
+            text: liveAgent
+              ? `Error: Agent "${name}" exists in hcom as "${liveAgent.name}" but is not managed by this server in workspace "${cwd}". Managed agents: ${formatManagedNames(records.map((record) => record.hcomName))}`
+              : `Error: Agent "${name}" was not found in the managed registry or live hcom for workspace "${cwd}". Managed agents: ${formatManagedNames(records.map((record) => record.hcomName))}`,
+          }],
+          isError: true,
+        };
+      }
+
+      if (owned.state === "managed_lost" && !liveAgent) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Error: Agent "${name}" has a stale managed record in workspace "${cwd}" but is no longer live in hcom.`,
+          }],
           isError: true,
         };
       }
 
       const result = await execHcom(["kill", name, "--go"]);
       if (result.exitCode !== 0) {
+        if ((result.stderr || result.stdout).toLowerCase().includes("not found")) {
+          updateRecordState(owned.id, "managed_lost");
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Error: Agent "${name}" is no longer live in hcom. Its managed record was marked managed_lost.`,
+            }],
+            isError: true,
+          };
+        }
+
         return {
           content: [{ type: "text" as const, text: `Error killing agent: ${result.stderr || result.stdout}` }],
           isError: true,
@@ -73,9 +134,9 @@ export function registerLifecycleTools(server: any) {
     }
   );
 
-  // hcom_promote
+  // promote
   server.tool(
-    "hcom_promote",
+    "promote",
     "Promote a blocked headless agent to headed (visible terminal). Choose to retain management or release to human.",
     {
       name: z.string().describe("hcom agent name"),
@@ -88,19 +149,48 @@ export function registerLifecycleTools(server: any) {
       workspace?: string;
     }) => {
       const cwd = workspace ?? process.cwd();
-      const records = getActiveRecords(cwd);
+      const records = getOwnedRecordsByWorkspace(cwd);
       const owned = records.find((r) => r.hcomName === name);
+      const liveAgents = await listHcomAgents();
+      const liveAgent = findLiveAgentByIdentifier(name, liveAgents);
 
       if (!owned) {
         return {
-          content: [{ type: "text" as const, text: `Error: Agent "${name}" is not managed by this server.` }],
+          content: [{
+            type: "text" as const,
+            text: liveAgent
+              ? `Error: Agent "${name}" exists in hcom as "${liveAgent.name}" but is not managed by this server in workspace "${cwd}". Managed agents: ${formatManagedNames(records.map((record) => record.hcomName))}`
+              : `Error: Agent "${name}" was not found in the managed registry or live hcom for workspace "${cwd}". Managed agents: ${formatManagedNames(records.map((record) => record.hcomName))}`,
+          }],
           isError: true,
         };
       }
 
-      // Resume the agent in a visible terminal
+      if (owned.state === "managed_lost" && !liveAgent) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Error: Agent "${name}" has a stale managed record in workspace "${cwd}" but is no longer live in hcom.`,
+          }],
+          isError: true,
+        };
+      }
+
+      // hcom r without --headless resumes in a visible terminal window (the user's
+      // configured terminal preset). Omitting the flag is what provides the headed behavior.
       const result = await execHcom(["r", name, "--go"]);
       if (result.exitCode !== 0) {
+        if ((result.stderr || result.stdout).toLowerCase().includes("not found")) {
+          updateRecordState(owned.id, "managed_lost");
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Error: Agent "${name}" is no longer live in hcom. Its managed record was marked managed_lost.`,
+            }],
+            isError: true,
+          };
+        }
+
         return {
           content: [{ type: "text" as const, text: `Error promoting agent: ${result.stderr || result.stdout}` }],
           isError: true,

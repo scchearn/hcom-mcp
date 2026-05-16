@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { execHcom, parseHcomJson } from "../hcom.js";
-import { getActiveRecords } from "../registry.js";
+import { execHcom, findLiveAgentByIdentifier, listHcomAgents, parseHcomJson } from "../hcom.js";
+import { getOwnedRecordsByWorkspace } from "../registry.js";
 
 export function registerInspectTool(server: any) {
   server.tool(
-    "hcom_inspect",
+    "inspect",
     "Inspect a managed agent: status, transcript, events, or terminal screen",
     {
       name: z.string().describe("hcom agent name to inspect"),
@@ -22,13 +22,16 @@ export function registerInspectTool(server: any) {
 
       try {
         // Verify ownership
-        const records = getActiveRecords(cwd);
+        const records = getOwnedRecordsByWorkspace(cwd);
         const owned = records.find((r) => r.hcomName === name);
         if (!owned) {
+          const liveAgent = findLiveAgentByIdentifier(name, await listHcomAgents());
           return {
             content: [{
               type: "text" as const,
-              text: `Error: Agent "${name}" is not managed by this server in workspace "${cwd}". Managed agents: ${records.map((r) => r.hcomName).join(", ")}`,
+              text: liveAgent
+                ? `Error: Agent "${name}" exists in hcom as "${liveAgent.name}" but is not managed by this server in workspace "${cwd}". Managed agents: ${records.map((r) => r.hcomName).filter(Boolean).join(", ") || "none"}`
+                : `Error: Agent "${name}" is not managed by this server in workspace "${cwd}". Managed agents: ${records.map((r) => r.hcomName).filter(Boolean).join(", ") || "none"}`,
             }],
             isError: true,
           };

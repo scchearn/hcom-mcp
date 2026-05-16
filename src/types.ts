@@ -37,10 +37,25 @@ export type OwnershipState = z.infer<typeof OwnershipStateEnum>;
 
 // --- Agent preset schema ---
 
-export const AgentPresetSchema = z.object({
-  name: z.string().min(1),
-  harness: HarnessEnum,
+export const HarnessVariantSchema = z.object({
   model: z.string().min(1),
+  reasoning: z.string().optional(),
+});
+export type HarnessVariant = z.infer<typeof HarnessVariantSchema>;
+
+export const AgentPresetHarnessMapSchema = z
+  .object({
+    claude: HarnessVariantSchema.optional(),
+    opencode: HarnessVariantSchema.optional(),
+    codex: HarnessVariantSchema.optional(),
+  })
+  .refine((value) => Object.values(value).some(Boolean), {
+    message: "At least one harness variant is required",
+  });
+export type AgentPresetHarnessMap = z.infer<typeof AgentPresetHarnessMapSchema>;
+
+export const AgentPresetSharedSchema = z.object({
+  name: z.string().min(1),
   headless: z.boolean().default(true),
   pty: z.boolean().default(false),
   tag: z.string().optional(),
@@ -48,13 +63,27 @@ export const AgentPresetSchema = z.object({
   prompt: z.string().optional(),
   systemPrompt: z.string().optional(),
 });
+
+export const AgentPresetSchema = AgentPresetSharedSchema.extend({
+  harness: AgentPresetHarnessMapSchema,
+});
 export type AgentPreset = z.infer<typeof AgentPresetSchema>;
+
+export const LegacyAgentPresetSchema = AgentPresetSharedSchema.extend({
+  harness: HarnessEnum,
+  model: z.string().min(1),
+});
+export type LegacyAgentPreset = z.infer<typeof LegacyAgentPresetSchema>;
+
+export const AgentPresetInputSchema = z.union([AgentPresetSchema, LegacyAgentPresetSchema]);
+export type AgentPresetInput = z.infer<typeof AgentPresetInputSchema>;
 
 // --- Topology role schema ---
 
 export const TopologyRoleSchema = z.object({
   role: z.string().min(1),
   preset: z.string().min(1), // references an AgentPreset name
+  harness: HarnessEnum,
   count: z.number().int().min(1).default(1),
 });
 export type TopologyRole = z.infer<typeof TopologyRoleSchema>;
@@ -79,6 +108,12 @@ export type TopologyPreset = z.infer<typeof TopologyPresetSchema>;
 
 // --- Global config schema ---
 
+export const GlobalConfigInputSchema = z.object({
+  agentPresets: z.record(z.string(), AgentPresetInputSchema).default({}),
+  topologyPresets: z.record(z.string(), TopologyPresetSchema).default({}),
+});
+export type GlobalConfigInput = z.infer<typeof GlobalConfigInputSchema>;
+
 export const GlobalConfigSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetSchema).default({}),
   topologyPresets: z.record(z.string(), TopologyPresetSchema).default({}),
@@ -86,6 +121,12 @@ export const GlobalConfigSchema = z.object({
 export type GlobalConfig = z.infer<typeof GlobalConfigSchema>;
 
 // --- Workspace config schema (overlay) ---
+
+export const WorkspaceConfigInputSchema = z.object({
+  agentPresets: z.record(z.string(), AgentPresetInputSchema).optional(),
+  topologyPresets: z.record(z.string(), TopologyPresetSchema).optional(),
+});
+export type WorkspaceConfigInput = z.infer<typeof WorkspaceConfigInputSchema>;
 
 export const WorkspaceConfigSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetSchema).optional(),

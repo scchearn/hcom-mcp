@@ -8,8 +8,8 @@ import {
   type OwnershipState,
 } from "./types.js";
 
-const REGISTRY_DIR = join(homedir(), ".hcom", "mcp");
-const REGISTRY_PATH = join(REGISTRY_DIR, "registry.json");
+export const REGISTRY_DIR = join(homedir(), ".hcom", "mcp");
+export const REGISTRY_PATH = join(REGISTRY_DIR, "registry.json");
 
 interface Registry {
   records: RegistryRecord[];
@@ -58,6 +58,13 @@ export function addRecord(record: Omit<RegistryRecord, "id" | "createdAt" | "las
 export function getRecordsByWorkspace(workspace: string): RegistryRecord[] {
   const registry = loadRegistry();
   return registry.records.filter((r) => r.workspace === workspace);
+}
+
+/**
+ * Get all non-released records for a workspace, including lost/stopped records.
+ */
+export function getOwnedRecordsByWorkspace(workspace: string): RegistryRecord[] {
+  return getRecordsByWorkspace(workspace).filter((r) => !r.released);
 }
 
 /**

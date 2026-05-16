@@ -1,52 +1,220 @@
 import { z } from "zod";
-import { execHcom, parseHcomJson } from "../hcom.js";
+import { execHcom, listHarnessModels } from "../hcom.js";
+import type { ExecOptions, ModelDiscoveryResult } from "../hcom.js";
 import { loadMergedConfig, resolveAgentPreset, resolveTopologyPreset, validateTopologyReferences } from "../config.js";
 import { addRecord, removeRecords } from "../registry.js";
-import { HARNESS_COMMAND } from "../types.js";
-import type { AgentPreset, MergedConfig } from "../types.js";
+import { HARNESS_COMMAND, HarnessEnum } from "../types.js";
+import type { AgentPreset, Harness } from "../types.js";
+
+type ModelCatalogCache = Map<Harness, ModelDiscoveryResult>;
+
+type ResolvedLaunchPreset = {
+  name: string;
+  harness: Harness;
+  model: string;
+  headless: boolean;
+  pty: boolean;
+  tag?: string;
+  dir?: string;
+  prompt?: string;
+  systemPrompt?: string;
+  reasoning?: string;
+};
+
+type LaunchResult = {
+  presetName: string;
+  hcomNames: string[];
+  batchId: string | null;
+  registryId: string;
+  registryIds: string[];
+  command: string;
+};
+
+function defaultPromptForHarness(harness: Harness): string | undefined {
+  if (harness === "claude") return "Wait for instructions from the hub.";
+  return undefined;
+}
+
+function getSupportedHarnesses(preset: AgentPreset) {
+  return Object.entries(preset.harness)
+    .filter(([, variant]) => Boolean(variant))
+    .map(([harness]) => harness)
+    .sort();
+}
+
+function resolvePresetHarness(
+  preset: AgentPreset,
+  harness: Harness
+): ResolvedLaunchPreset {
+  const variant = preset.harness[harness];
+  if (!variant) {
+    throw new Error(
+      `Preset "${preset.name}" does not support harness "${harness}". Supported: ${getSupportedHarnesses(preset).join(", ")}.`
+    );
+  }
+
+  return {
+    name: preset.name,
+    harness,
+    model: variant.model,
+    headless: preset.headless,
+    pty: preset.pty,
+    tag: preset.tag,
+    dir: preset.dir,
+    prompt: preset.prompt,
+    systemPrompt: preset.systemPrompt,
+    reasoning: variant.reasoning,
+  };
+}
+
+function matchesConfiguredModel(
+  preset: Pick<ResolvedLaunchPreset, "harness" | "model">,
+  catalog: ModelDiscoveryResult
+) {
+  if (catalog.models.includes(preset.model)) {
+    return true;
+  }
+
+  if (preset.harness === "claude") {
+    return catalog.models.includes(preset.model.replace(/\[1m\]$/, ""));
+  }
+
+  return false;
+}
+
+export async function validatePresetModelAvailability(
+  preset: Pick<ResolvedLaunchPreset, "name" | "harness" | "model">,
+  catalogCache: ModelCatalogCache = new Map()
+): Promise<string | null> {
+  let catalog = catalogCache.get(preset.harness);
+  if (!catalog) {
+    [catalog] = await listHarnessModels(preset.harness);
+    catalogCache.set(preset.harness, catalog);
+  }
+
+  if (catalog.status === "error") {
+    return `Could not verify model "${preset.model}" for preset "${preset.name}": ${catalog.reason ?? `failed to read the ${preset.harness} model catalog`}.`;
+  }
+
+  if (!matchesConfiguredModel(preset, catalog)) {
+    return `Configured model "${preset.model}" for preset "${preset.name}" was not found in the ${catalog.status} ${preset.harness} model catalog. Use list_models to inspect available models.`;
+  }
+
+  return null;
+}
 
 /**
- * Register the hcom_launch tool for single-agent launch.
+ * Register the launch tool for single-agent launch.
  */
 export function registerLaunchTool(server: any) {
   server.tool(
-    "hcom_launch",
-    "Launch a headless hcom agent using a named agent preset from config",
+    "launch",
+    "Launch a headless hcom agent. Use a preset name for configured defaults, or provide harness+model directly for a bare launch. Preset defaults (model, tag, prompt) can be overridden with explicit parameters.",
     {
-      preset: z.string().describe("Name of the agent preset from config"),
+      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex)"),
+      preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
+      model: z.string().optional().describe("Model name override or standalone model for bare launches"),
       prompt: z.string().optional().describe("Initial prompt for the agent"),
+      tag: z.string().optional().describe("Tag for the agent (defaults to harness name for bare launches)"),
       dir: z.string().optional().describe("Working directory override"),
       workspace: z.string().optional().describe("Workspace path for ownership tracking"),
+      reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
     },
-    async ({ preset: presetName, prompt, dir, workspace }: {
-      preset: string;
+    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, reasoning }: {
+      harness: Harness;
+      preset?: string;
+      model?: string;
       prompt?: string;
+      tag?: string;
       dir?: string;
       workspace?: string;
+      reasoning?: string;
     }) => {
       const cwd = workspace ?? process.cwd();
 
       try {
-        const config = loadMergedConfig(cwd);
-        const preset = resolveAgentPreset(config, presetName);
-
-        if (!preset) {
+        // Require at least preset or model
+        if (!presetName && !model) {
           return {
             content: [{
               type: "text" as const,
-              text: `Error: Agent preset "${presetName}" not found. Available presets: ${Object.keys(config.agentPresets).join(", ")}`,
+              text: "Error: Provide at least a preset or a model. Use list_presets to see available presets, or specify harness + model for a bare launch.",
             }],
             isError: true,
           };
         }
 
-        const result = await launchAgent(preset, { prompt, dir: dir ?? preset.dir }, cwd);
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          }],
-        };
+        if (presetName) {
+          // Preset path — current behavior plus model/tag overrides
+          const config = loadMergedConfig(cwd);
+          const preset = resolveAgentPreset(config, presetName);
+
+          if (!preset) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Error: Agent preset "${presetName}" not found. Available presets: ${Object.keys(config.agentPresets).join(", ")}. Use list_presets to inspect the merged preset catalog.`,
+              }],
+              isError: true,
+            };
+          }
+
+          if (!harness) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Error: Launch preset "${preset.name}" requires an explicit harness. Supported: ${getSupportedHarnesses(preset).join(", ")}.`,
+              }],
+              isError: true,
+            };
+          }
+
+          const resolvedPreset = resolvePresetHarness(preset, harness);
+
+          // Apply overrides
+          if (model) {
+            resolvedPreset.model = model;
+          }
+          if (tag) {
+            resolvedPreset.tag = tag;
+          }
+          if (reasoning) {
+            resolvedPreset.reasoning = reasoning;
+          }
+
+          // Resolve effective prompt upstream
+          resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
+
+          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd);
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify(result, null, 2),
+            }],
+          };
+        } else {
+          // Bare launch path — no preset, harness + model required
+          const resolvedPreset: ResolvedLaunchPreset = {
+            name: "adhoc",
+            harness,
+            model: model!,
+            headless: true,
+            pty: false,
+            tag: tag ?? harness,
+            dir,
+            prompt: prompt ?? defaultPromptForHarness(harness),
+            systemPrompt: undefined,
+            reasoning,
+          };
+
+          const result = await launchAgent(resolvedPreset, { dir }, cwd);
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify(result, null, 2),
+            }],
+          };
+        }
       } catch (err: any) {
         return {
           content: [{ type: "text" as const, text: `Error: ${err.message}` }],
@@ -58,11 +226,11 @@ export function registerLaunchTool(server: any) {
 }
 
 /**
- * Register the hcom_launch_topology tool for multi-agent batch launch.
+ * Register the launch_topology tool for multi-agent batch launch.
  */
 export function registerTopologyLaunchTool(server: any) {
   server.tool(
-    "hcom_launch_topology",
+    "launch_topology",
     "Launch multiple agents from a topology preset. Rolls back all if any fail.",
     {
       topology: z.string().describe("Name of the topology preset from config"),
@@ -82,7 +250,7 @@ export function registerTopologyLaunchTool(server: any) {
           return {
             content: [{
               type: "text" as const,
-              text: `Error: Topology preset "${topologyName}" not found. Available: ${Object.keys(config.topologyPresets).join(", ")}`,
+              text: `Error: Topology preset "${topologyName}" not found. Available: ${Object.keys(config.topologyPresets).join(", ")}. Use list_topologies to inspect the merged topology catalog.`,
             }],
             isError: true,
           };
@@ -100,46 +268,47 @@ export function registerTopologyLaunchTool(server: any) {
           };
         }
 
-        // Launch agents one at a time, collecting results for rollback on failure
-        const launched: Array<{
-          presetName: string;
-          hcomNames: string[];
-          batchId: string | null;
-          registryId: string;
-          command: string;
-        }> = [];
-        const registryIds: string[] = [];
+        const modelCatalogCache: ModelCatalogCache = new Map();
 
-        for (const role of topology.roles) {
+        const resolvedRoles = topology.roles.flatMap((role) => {
           const preset = resolveAgentPreset(config, role.preset);
           if (!preset) {
-            // Rollback all previously launched agents
-            removeRecords(registryIds);
-            for (const prev of launched) {
-              for (const name of prev.hcomNames) {
-                await execHcom(["kill", name, "--go"]);
-              }
-            }
+            throw new Error(`Role "${role.role}" references missing preset "${role.preset}".`);
+          }
+
+          const resolved = resolvePresetHarness(
+            {
+              ...preset,
+              tag: preset.tag ?? role.role,
+            },
+            role.harness,
+          );
+
+          return Array.from({ length: role.count }, () => ({ role, resolved }));
+        });
+
+        for (const { role, resolved } of resolvedRoles) {
+          const validationError = await validatePresetModelAvailability(resolved, modelCatalogCache);
+          if (validationError) {
             return {
               content: [{
                 type: "text" as const,
-                text: `Error: Preset "${role.preset}" for role "${role.role}" not found during launch. Rolled back ${launched.length} agents.`,
+                text: `Error: Failed to validate role "${role.role}" with preset "${role.preset}": ${validationError}`,
               }],
               isError: true,
             };
           }
+        }
 
-          // Apply role-specific tag override
-          const rolePreset: AgentPreset = {
-            ...preset,
-            tag: preset.tag ?? role.role,
-            prompt: preset.prompt,
-          };
+        // Launch agents one at a time, collecting results for rollback on failure
+        const launched: LaunchResult[] = [];
+        const registryIds: string[] = [];
 
+        for (const { role, resolved } of resolvedRoles) {
           try {
-            const result = await launchAgent(rolePreset, { prompt: preset.prompt }, cwd);
+            const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache);
             launched.push(result);
-            registryIds.push(result.registryId);
+            registryIds.push(...result.registryIds);
           } catch (err: any) {
             // Rollback all previously launched agents
             removeRecords(registryIds);
@@ -182,16 +351,16 @@ export function registerTopologyLaunchTool(server: any) {
  * Build and execute an hcom launch command for a single agent preset.
  */
 async function launchAgent(
-  preset: AgentPreset,
+  preset: ResolvedLaunchPreset,
   overrides: { prompt?: string; dir?: string },
-  workspace: string
-): Promise<{
-  presetName: string;
-  hcomNames: string[];
-  batchId: string | null;
-  registryId: string;
-  command: string;
-}> {
+  workspace: string,
+  catalogCache: ModelCatalogCache = new Map()
+): Promise<LaunchResult> {
+  const validationError = await validatePresetModelAvailability(preset, catalogCache);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
   const args: string[] = [];
 
   // hcom <harness> [tool-args...]
@@ -218,18 +387,65 @@ async function launchAgent(
     args.push("--dir", overrides.dir ?? preset.dir!);
   }
 
-  if (overrides.prompt ?? preset.prompt) {
-    args.push("--hcom-prompt", overrides.prompt ?? preset.prompt!);
+  if (preset.prompt) {
+    args.push("--hcom-prompt", preset.prompt);
   }
 
   if (preset.systemPrompt) {
     args.push("--hcom-system-prompt", preset.systemPrompt);
   }
 
+  if (preset.reasoning) {
+    if (preset.harness === "opencode" && preset.headless === false) {
+      args.push("--variant", preset.reasoning);
+    } else if (preset.harness === "claude") {
+      args.push("--effort", preset.reasoning);
+    }
+    // headless opencode: reasoning variant injected via OPENCODE_CONFIG_CONTENT (see execOptions below)
+    // codex: silently ignore
+  }
+
+  if (preset.headless !== false) {
+    if (preset.harness === "codex") {
+      args.push("--full-auto");
+    } else if (preset.harness === "claude") {
+      args.push("--dangerously-skip-permissions");
+    }
+    // opencode: trusted mode injected via OPENCODE_CONFIG_CONTENT (see execOptions below)
+  }
+
   // --go to skip preview
   args.push("--go");
 
-  const result = await execHcom(args);
+  // For trusted headless OpenCode sessions, inject a config that grants full permissions and
+  // sets the requested reasoning variant. OPENCODE_CONFIG_CONTENT is a real OpenCode env var
+  // that hcom does not overwrite or unset (unlike OPENCODE_PERMISSION), so it survives through
+  // the hcom launch-script chain and reaches the opencode serve process.
+  //
+  // --dangerously-skip-permissions is intentionally NOT used here: it is only valid for
+  // `opencode run`, not for `opencode serve` which is what hcom uses for headless launches.
+  // The cwd-overlay approach is also not used: OpenCode discovers config relative to the project
+  // tree, not the process cwd, so overlays written elsewhere are invisible to the runtime.
+  const execOptions: ExecOptions = {};
+  if (preset.headless !== false && preset.harness === "opencode") {
+    const configContent: Record<string, any> = {
+      permission: {
+        // Headless managed sessions run in fully trusted mode. The hcom launch already injects
+        // a narrow OPENCODE_PERMISSION; this config content widens it for unattended workers.
+        "*": "allow",
+        external_directory: "allow",
+      },
+    };
+    if (preset.reasoning) {
+      configContent.agent = {
+        coder: { variant: preset.reasoning },
+        orchestrator: { variant: preset.reasoning },
+      };
+    }
+    execOptions.env = { OPENCODE_CONFIG_CONTENT: JSON.stringify(configContent) };
+  }
+
+  const result = await execHcom(args, execOptions);
 
   if (result.exitCode !== 0) {
     throw new Error(`hcom launch failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`);
@@ -242,22 +458,26 @@ async function launchAgent(
   const hcomNames = namesMatch ? namesMatch[1].trim().split(/\s+/) : [];
   const batchId = batchMatch ? batchMatch[1] : null;
 
-  // Record ownership
-  const record = addRecord({
-    workspace,
-    harness: preset.harness,
-    hcomName: hcomNames[0],
-    preset: preset.name,
-    launchMode: preset.headless !== false ? "headless" : "headed",
-    state: "managed_active",
-    released: false,
-  });
+  // Record ownership for every launched worker name.
+  const trackedNames = hcomNames.length > 0 ? hcomNames : [undefined];
+  const records = trackedNames.map((hcomName) =>
+    addRecord({
+      workspace,
+      harness: preset.harness,
+      hcomName,
+      preset: preset.name,
+      launchMode: preset.headless !== false ? "headless" : "headed",
+      state: "managed_active",
+      released: false,
+    })
+  );
 
   return {
     presetName: preset.name,
     hcomNames,
     batchId,
-    registryId: record.id,
+    registryId: records[0].id,
+    registryIds: records.map((record) => record.id),
     command: `hcom ${args.join(" ")}`,
   };
 }

@@ -2,7 +2,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerLaunchTool, registerTopologyLaunchTool } from "./tools/launch.js";
-import { registerListManagedTool } from "./tools/list.js";
+import {
+  registerConfigPathsTool,
+  registerListAllTool,
+  registerListManagedTool,
+  registerListPresetsTool,
+  registerListTopologiesTool,
+  registerStatusTool,
+} from "./tools/list.js";
+import { registerListModelsTool, registerModelResources } from "./tools/models.js";
 import { registerInspectTool } from "./tools/inspect.js";
 import { registerLifecycleTools } from "./tools/lifecycle.js";
 import { isHcomAvailable } from "./hcom.js";
@@ -25,6 +33,13 @@ async function main() {
   registerLaunchTool(server);
   registerTopologyLaunchTool(server);
   registerListManagedTool(server);
+  registerListAllTool(server);
+  registerListModelsTool(server);
+  registerModelResources(server);
+  registerListPresetsTool(server);
+  registerListTopologiesTool(server);
+  registerConfigPathsTool(server);
+  registerStatusTool(server);
   registerInspectTool(server);
   registerLifecycleTools(server);
 

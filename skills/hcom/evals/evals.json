@@ -1,0 +1,139 @@
+{
+  "skill_name": "hcom",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Show me how to use hcom from my current OpenCode session to coordinate a Codex worker and a Claude worker on one task. I want practical commands and the right defaults.",
+      "expected_output": "A practical current-session hub pattern that keeps the current OpenCode session visible, launches headless workers, and uses one workflow thread with explicit routing and intent defaults.",
+      "assertions": [
+        "The output keeps the current OpenCode session as the hub",
+        "The output does not tell the user to launch another visible hcom opencode coordinator",
+        "The output launches workers with --headless and --go",
+        "The output uses one explicit workflow thread",
+        "The output prefers stable role routing such as @eng- and @review-"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I want a quick hcom pattern for OpenCode coordinating Gemini and Codex. Most agents should stay in the background. Sometimes agents may need to hand work to each other instead of always reporting to me. What should I do?",
+      "expected_output": "A quick hub-spoke pattern with threaded peer handoffs, headless background workers, and final reporting that stays on-thread for the hub.",
+      "assertions": [
+        "The output states that most workers should stay in the background or be headless",
+        "The output allows direct worker-to-worker handoff on the same thread when the topology requires it",
+        "The output keeps the current session as the coordinator or hub",
+        "The output uses a single shared thread for the workflow",
+        "The output stays in practical operating-guidance scope rather than becoming a script or team-plan answer"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Just give me the practical hcom commands and defaults for coordinating Claude and Codex from my current session. Do not turn this into a script.",
+      "expected_output": "Direct commands and defaults for a current-session coordinator pattern, without drifting into reusable script authoring.",
+      "assertions": [
+        "The output gives direct hcom commands",
+        "The output does not present the answer as a reusable script",
+        "The output includes current-session coordinator defaults",
+        "The output includes thread and intent guidance"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "How should I keep worker updates quiet without losing important results when I coordinate them with hcom?",
+      "expected_output": "Guidance that uses inform for routine status, request when a reply is required, and reserves ack for explicit acknowledgments rather than generic low-noise status.",
+      "assertions": [
+        "The output recommends inform for routine status or final updates",
+        "The output recommends request when a reply is required",
+        "The output does not recommend ack as the default for routine quiet status",
+        "The output treats ack as an explicit acknowledgment case"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Give me a safe default launch pattern for OpenCode, Codex, and Gemini workers under hcom.",
+      "expected_output": "A safe launch pattern with headless workers, no thread flag on spawn commands, and thread use reserved for send, listen, or events commands.",
+      "assertions": [
+        "The output uses --headless in the worker spawn examples",
+        "The output uses --go in the worker spawn examples",
+        "The output does not put --thread on spawn commands",
+        "The output keeps --thread guidance on messaging or wait commands"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "My hcom hooks seem broken and messages are not arriving. What should I do?",
+      "expected_output": "A response that recognizes setup or troubleshooting scope and defers to hcom-agent-messaging or equivalent install and diagnostic guidance rather than pretending this skill is the primary troubleshooting reference.",
+      "assertions": [
+        "The output identifies the problem as setup or troubleshooting scope",
+        "The output points to hcom-agent-messaging or equivalent diagnostic commands such as hcom status or hcom hooks status",
+        "The output does not present current-session coordination defaults as the main answer"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Write me a reusable hcom workflow script for coordinating a reviewer and an implementer.",
+      "expected_output": "A response that recognizes script-authoring scope and defers to hcom-agent-messaging or the script reference instead of treating script writing as the main responsibility of this skill.",
+      "assertions": [
+        "The output identifies the request as reusable workflow script scope",
+        "The output points to hcom-agent-messaging or script-oriented guidance",
+        "The output does not present the hcom skill as the primary scripting reference"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "I have hcom-mcp connected in OpenCode. I need to discover what topologies are available, launch one, and then coordinate the workers on a shared thread. What is the right pattern?",
+      "expected_output": "A response that treats hcom-mcp as the control plane for discovery and launch, then switches to raw hcom thread coordination once workers exist.",
+      "assertions": [
+        "The output recommends hcom-mcp tools such as list_topologies and launch_topology for discovery and launch",
+        "The output keeps the current session as the visible hub",
+        "The output uses raw hcom send for workflow communication on a shared thread",
+        "The output does not tell the user to read config files just to discover topologies"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "If hcom-mcp is connected, should I inspect files to discover presets and topologies, or should I use the MCP?",
+      "expected_output": "A response that prefers the MCP surface for discovery and state, and reserves file inspection for fallback or explicit config work.",
+      "assertions": [
+        "The output prefers hcom-mcp tools such as status, list_presets, list_topologies, or config_paths for discovery",
+        "The output does not recommend repo searching or config-file reads as the first discovery step",
+        "The output keeps raw hcom positioned as the communication plane rather than the discovery plane"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "spawn three research agents, get them to reserach the hcom package on github, look at configs and settings and to confirm how the launching works to create combined threads and how to get the headless agents to send messages back to the hub/headed relaibly. explictly tell the research agents to respond back to the hub.",
+      "expected_output": "A response that invokes hcom coordination for agent launch, uses hcom-mcp for discovery and launch when connected, then uses raw hcom messaging for the shared thread and explicit report-back instructions.",
+      "assertions": [
+        "The output treats the prompt as agent-coordination scope and invokes the hcom skill path rather than handling it as generic shell exploration",
+        "The output recommends hcom-mcp discovery tools such as status, list_presets, or list_topologies before launch",
+        "The output recommends launch_topology or repeated launch calls rather than starting with raw hcom spawn commands",
+        "The output uses raw hcom send for a shared thread after workers exist",
+        "The output explicitly tells research agents to report back to the hub or current session on-thread",
+        "The output does not begin with hcom 3 opencode or hcom --help style launch discovery",
+        "The output does not recommend hcom listen as the normal waiting pattern after telling workers to report back"
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "hcom-mcp is connected, but none of my saved topologies exactly matches the work. I still need three workers on one shared thread. Should I fall back to raw hcom launch commands?",
+      "expected_output": "A response that stays on the MCP path by using preset discovery and repeated launch calls when no exact topology exists, and reserves raw hcom for the communication plane.",
+      "assertions": [
+        "The output does not recommend falling back to raw launch commands just because no exact topology matches",
+        "The output recommends list_presets or list_topologies first",
+        "The output recommends repeated launch calls with explicit preset and harness when topology is not an exact fit",
+        "The output keeps raw hcom for shared-thread messaging rather than first-choice launch control"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "I already launched the workers, seeded a shared thread, and explicitly told them to report back to the hub on that thread. How should I wait for their findings?",
+      "expected_output": "A response that tells the hub to end its turn and let incoming hcom messages arrive naturally, rather than blocking on listen or polling in a loop.",
+      "assertions": [
+        "The output says to end the turn or otherwise wait for natural incoming hcom messages",
+        "The output does not recommend hcom listen as the normal waiting pattern",
+        "The output does not recommend repeated hcom events polling loops as the default waiting pattern",
+        "The output reserves hcom events, transcript, or list for inspection or diagnosis rather than ordinary waiting"
+      ]
+    }
+  ]
+}
