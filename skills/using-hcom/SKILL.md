@@ -3,7 +3,7 @@ name: using-hcom
 description: Use when the user wants to spawn an agent, coordinate, route, or supervise agents via hcom or hcom-mcp, or when a task would clearly benefit from delegating to a headless worker. Not for installation, troubleshooting, reusable hcom scripts (→ hcom-agent-messaging), or full team-topology design (→ do-agents).
 allowed-tools: Read Glob Grep Bash
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
   author: scchearn
 ---
 
@@ -140,6 +140,7 @@ Common mistakes:
 - Do not rely on shell quoting for complex reviews or code snippets; use `--file`.
 - Do not put backtick-containing message text after `--` in inline sends; use `--file`.
 - Do not abandon a report when `hcom send` fails with `attempt to write a readonly database`; retry once, then fall back to shorter inline, then deliver via your own reply text.
+- Do not relay a received message to agents who were also @mentioned on the original; the sender already delivered it to them.
 
 ## House Defaults
 
@@ -192,6 +193,24 @@ For worked examples of MCP-first launch flow and bad/good waiting patterns, see 
 - **The sender is never included in `delivered_to`** — if the hub creates a thread by sending `@eng- @review-`, the hub is NOT a thread member and will NOT receive thread messages
 - To make the hub a thread member, include `@<hub-name>` in the seed @mentions; when `hcom-mcp` is connected, prefer `thread_seed` over raw `hcom send` for thread creation (pass `hub_name` explicitly in the HTTP/unbound path)
 
+## Relay Discipline
+
+When you receive a message you were @mentioned on, the sender already routed it to every recipient who needed it. Do not re-send the same content to agents who were also @mentioned on the original.
+
+- Receiving a message is not a signal to redistribute it. Trust the sender's routing.
+- Only relay a received message if you are adding a NEW recipient who was not on the original @mentions, OR substantively new framing that changes what the recipient should do with it.
+- Verbatim or near-verbatim forwarding to an existing recipient is noise, not help.
+- If you are an FYI recipient (not the action owner), read and stay informed — do not amplify or redistribute.
+- Worried a co-recipient missed it? Ask them to confirm, do not re-send the content.
+
+Rationalizations to reject:
+
+| Excuse | Reality |
+|---|---|
+| "I'm not forwarding, I'm pinging them to act" | Pinging a co-recipient to act on a message they already received is still re-routing; the original @mention already requested action. |
+| "I summarized it, that's new framing" | A summary that doesn't change the ask is still noise. Substantive framing changes what the recipient should *do*, not how they read it. |
+| "What if they missed it?" | Ask them to confirm. Do not re-send the content. |
+
 For common mistakes, rationalization counters, and red flags, see `references/discipline.md`.
 
 ## Cross-Tool Launch Patterns
@@ -223,6 +242,8 @@ When you tell a worker what to do, include these defaults:
 - when a workflow thread exists, report blockers and final outcomes on-thread, @mentioning the hub (`@<hub-name>`) on important replies
 - hand work directly to another tagged role only when the topology requires it
 - stop when the assignment is complete if the task is one-shot
+- when you receive a thread message you were @mentioned on, do not re-send its content to other @mentions of the same message; the sender already routed it
+- only relay if you are adding a new recipient or substantively new framing that changes what the recipient should do, not verbatim forwarding
 
 Bad and good intent example:
 
