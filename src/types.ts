@@ -32,6 +32,9 @@ export const OwnershipStateEnum = z.enum([
   "managed_blocked",
   "managed_released",
   "managed_lost",
+  "adopted_active",
+  "adopted_stopped",
+  "adopted_lost",
 ]);
 export type OwnershipState = z.infer<typeof OwnershipStateEnum>;
 
@@ -153,8 +156,9 @@ export const RegistryRecordSchema = z.object({
   preset: z.string().optional(),
   topology: z.string().optional(),
   topologyRole: z.string().optional(),
-  launchMode: LaunchModeEnum,
+  launchMode: LaunchModeEnum.optional(),
   state: OwnershipStateEnum,
+  launchedBy: z.string().optional(),
   createdAt: z.string(),
   lastSeenAt: z.string(),
   released: z.boolean().default(false),
