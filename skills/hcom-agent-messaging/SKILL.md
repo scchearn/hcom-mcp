@@ -120,6 +120,16 @@ agents follow these rules from their bootstrap:
 - `--intent inform` -> agent responds only if useful
 - `--intent ack` -> agent does not respond
 
+### thread mechanics
+
+- a thread is a **conversation namespace**, not a fixed membership group
+- @mentions on each individual message determine that message's delivery — the seed does not lock membership
+- `hcom send --thread X` as broadcast (no @mentions) reuses the last-seed member list, but this is unreliable for hub routing
+- **the sender is never included in `delivered_to`** — if a hub creates a thread by sending `@eng- @review-`, the hub is NOT a thread member
+- to make the hub a thread member, include `@<hub-name>` (the hub's CVCV name from the hcom system context) in the @mentions of the seed message
+- for important replies and final outcomes, workers should also `@<hub-name>` explicitly — do not rely on broadcast routing to reach the hub
+- the hub discovers its CVCV name from the hcom system context (`Your name: <name>`) or via `hcom list`
+
 ### sandbox / permission issues
 
 ```bash

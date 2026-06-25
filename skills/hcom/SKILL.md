@@ -1,6 +1,6 @@
 ---
 name: hcom
-description: Use when the user wants to spawn, launch, coordinate, route, or supervise agents or workers with hcom or hcom-mcp, or when work might benefit from an agent and you need practical hub defaults, launch choices, shared-thread routing, headless worker behavior, or reliable report-back to the current session.
+description: Use when the user wants to spawn an agent, coordinate, route, or supervise agents via hcom or hcom-mcp, or when a task would clearly benefit from delegating to a headless worker. Not for installation, troubleshooting, reusable hcom scripts (→ hcom-agent-messaging), or full team-topology design (→ do-agents).
 ---
 
 # hcom
@@ -48,17 +48,61 @@ Use MCP first for discovery, launch, and managed-fleet state. Use raw `hcom` onc
 | discover saved launch options | `list_presets`, `list_topologies` |
 | understand current state | `status`, `config_paths`, `list_all`, `list_managed` |
 | inspect one managed agent | `inspect` |
+| seed a workflow thread with exact hub mention auto-included | `thread_seed` |
+| inspect thread messages | `thread_inspect` |
 | launch or clean up managed workers | `launch`, `launch_topology`, `inspect`, `stop`, `kill`, `promote` |
-| assign work, seed threads, route peer handoffs, watch message flow | raw `hcom send`, `hcom events`, `hcom transcript` |
+| assign work, route peer handoffs, subsequent thread sends, watch message flow | raw `hcom send`, `hcom events`, `hcom transcript` |
 
 Rules:
 
 - if `hcom-mcp` is connected, you MUST use MCP for discovery and launch before using raw `hcom` spawn commands or `hcom --help` for launch discovery
 - if `hcom-mcp` exposes the operation, do not use bash plus raw `hcom` for the same control-plane task; use the MCP tool instead
+- if `hcom-mcp` is connected, use `thread_seed` instead of raw `hcom send` for thread creation — it auto-includes the exact `@<hub-name>` mention in the seed, and HTTP/unbound callers should pass `hub_name` explicitly
 - do not read `~/.hcom/mcp/config.json`, `.hcom-mcp.json`, or hunt the repo just to discover presets or topologies when `hcom-mcp` is connected
 - do not treat `hcom-mcp` as the message bus; it bootstraps and supervises, but workflow communication still lives on shared hcom threads
 - if no exact topology matches, stay on the MCP path: use `list_presets`, then issue repeated `launch` calls with explicit preset and harness
 - only fall back to raw `hcom` CLI for control-plane work when the MCP is unavailable, the user explicitly wants shell commands only, or the MCP lacks the operation you need
+
+## Core Send Syntax
+
+To send a message, put the recipients first as `@name` or `@tag-`, then any flags, then `--`, then the message text.
+
+```bash
+hcom send @name-or-tag- [--intent request|inform|ack] [--reply-to ID] [--thread THREAD] -- "message text"
+```
+
+Rules:
+
+- Required: at least one `@recipient` and the `--` separator before message text.
+- Usually required by house policy: `--intent request|inform|ack`.
+- Optional: `--thread`, only for workflow scoping.
+- Optional: `--reply-to`, only when responding to a specific message id.
+- Direct messages are valid: omit `--thread` for a one-off direct send.
+- Tagged routes use a trailing dash, e.g. `@eng-`; named agents use `@mona`.
+
+Examples:
+
+```bash
+hcom send @mona --intent inform -- "Available for review."
+hcom send @review- --thread "$WF_THREAD" --intent request -- "Review this on-thread."
+```
+
+`--thread` is optional command syntax; it is a workflow-scoping convention, not part of core delivery.
+
+Shell quoting:
+
+- Short plain text can go after `--` in quotes.
+- For multiline Markdown or text containing backticks, `$variables`, brackets, nested quotes, or code blocks, prefer `--file` so the shell does not rewrite the message before `hcom` receives it.
+- `--file` reads the message from a local file. Create the file using the current shell's normal temporary-file method; avoid it for secrets unless you control permissions and cleanup.
+- If exact input modes matter, run `hcom send --help`.
+
+Common mistakes:
+
+- Do not put message text before `--`.
+- Do not route to `@eng` when you mean the tag `@eng-`.
+- Do not use `--thread` on launch commands.
+- Do not omit `@recipients` unless you intentionally want broadcast behavior and understand thread membership.
+- Do not rely on shell quoting for complex reviews or code snippets; use `--file`.
 
 ## House Defaults
 
@@ -66,9 +110,9 @@ Rules:
 |---|---|
 | Visible terminal | keep the current session headed |
 | Spawned workers | `--headless --go` |
-| Workflow isolation | one `WF_THREAD` per task |
+| Workflow isolation | for multi-step workflows, use one `WF_THREAD` per task |
 | Stable routing | tags like `@eng-`, `@review-`, `@research-` |
-| Final reporting | on the workflow thread so the hub sees it |
+| Final reporting | when using a workflow thread, report there so the hub sees it |
 | Peer handoff | allowed only when the topology needs it |
 | Assignment intent | `request` |
 | Routine status intent | `inform`, not `ack` |
@@ -76,8 +120,16 @@ Rules:
 | Messaging command | `hcom send` |
 | Waiting for worker replies | end your turn and let incoming hcom messages arrive naturally |
 | Tag syntax | launch with `--tag eng`, route with `@eng-` |
-| Message syntax | put all flags before `--`, then the message text |
+| Message syntax | recipients first as `@name` or `@tag-`; flags before `--`; message text after `--` |
 | Spawn threading | never pass `--thread` to launch commands |
+| Hub routing | seed with `@<hub-name>` so hub is thread member; workers `@<hub-name>` on important replies |
+| System prompt in presets | opencode: merged into `--hcom-prompt` as `[System Role]` prefix; claude/codex: passed as `--hcom-system-prompt` |
+
+Intent rule:
+
+- never send `--intent ack` in reply to an `inform` message
+- for an informational message, either send no reply or send a separate `inform` only if a useful status or availability update helps the workflow
+- reserve `ack` for explicit acknowledgments tied to a `request` or a reply context that actually needs confirmation
 
 ## Quick Start
 
@@ -86,7 +138,7 @@ Recommended order when `hcom-mcp` is connected:
 1. Use `status` to orient the current workspace.
 2. Use `list_presets` or `list_topologies` to discover what can be launched.
 3. If a topology fits, use `launch_topology`. Otherwise use repeated `launch` calls with explicit preset and harness.
-4. Seed one workflow thread with raw `hcom send` and run the collaboration there.
+4. For multi-agent workflows, seed one workflow thread with `thread_seed` and run the collaboration there. In the HTTP/unbound MCP path, pass `hub_name` explicitly.
 5. If the workers were told to report back on-thread, end your turn and wait for incoming hcom messages naturally.
 
 ## Waiting For Worker Replies
@@ -100,54 +152,37 @@ Rules:
 - use `hcom events` or `hcom transcript` for message-flow inspection, and use MCP tools such as `list_all` or `inspect` for control-plane inspection; do not default to raw `hcom list` when an MCP equivalent exists
 - if workers were instructed to reply on-thread to the hub/current session, end your turn and let incoming `<hcom>` messages wake the session naturally
 
-### MCP-first example for agent-launch requests
-
-When the user asks for several agents and `hcom-mcp` is connected, do the control plane with MCP first, then switch to raw `hcom send` for the shared thread:
-
-1. `status`
-2. `list_presets` and `list_topologies`
-3. `launch_topology` if an exact fit exists, otherwise repeated `launch` calls
-4. create one shared workflow thread with raw `hcom send`
-5. explicitly tell workers to report back on-thread to the hub/current session
-
-Bad pattern when MCP is connected:
-
-- `hcom 3 opencode ...`
-- `hcom opencode --help`
-- `hcom --help`
-- `hcom list --names`
-
-before checking `status`, `list_presets`, or `list_topologies`
-
-Bad waiting pattern after workers were told to report back:
-
-- `hcom listen 90`
-- `hcom listen 120`
-- repeated `hcom events --last N` polling loops
-
-Good waiting pattern:
-
-- seed the shared thread
-- tell workers to report back on-thread to the hub/current session
-- end your turn and wait for incoming `<hcom>` messages naturally
+For worked examples of MCP-first launch flow and common bad/good waiting patterns, see `references/examples.md`.
 
 ```bash
 WF_THREAD="repo-task-$(date +%s)"
 
-hcom send @eng- @review- --thread "$WF_THREAD" --intent inform -- \
-  "Use this thread only for the repo-task workflow. Keep updates concise. Peer handoffs are allowed only when they help the task move forward."
+hcom send @<$HUB_NAME> @eng- @review- --thread "$WF_THREAD" --intent inform -- \
+  "Use this thread only for the repo-task workflow. Hub (@<$HUB_NAME>) receives all thread updates. Keep updates concise. Peer handoffs are allowed only when they help the task move forward."
 
 hcom send @eng- --thread "$WF_THREAD" --intent request -- \
-  "Implement the change. Report blockers or final outcome on this thread."
+  "Implement the change. Report blockers or final outcome to @<$HUB_NAME> on this thread."
 
 hcom send @review- --thread "$WF_THREAD" --intent request -- \
-  "Review the engineer's work on this thread. Send APPROVED or FIX on-thread."
+  "Review the engineer's work on this thread. Send APPROVED or FIX to @<$HUB_NAME> on-thread."
 ```
 
-Because the thread was seeded with the hub and both worker tags, workers can report back without hardcoding the hub name:
+`$HUB_NAME` is the hub's own CVCV name (4 letters, e.g. `muho`). It is available from the hcom system context (`Your name: muho`) or from `hcom list`. Use the real name, not a tag — there is no `hub` tag unless you explicitly launched with `--tag hub`.
+
+### How Threads Work
+
+- A thread is a **name** for a conversation namespace, not a fixed membership group
+- @mentions on **each individual message** determine that message's delivery — the seed does not lock membership
+- `hcom send --thread X` as broadcast (no @mentions) reuses the last-seed member list, but this is unreliable for hub routing
+- **The sender is never included in `delivered_to`** — if the hub creates a thread by sending `@eng- @review-`, the hub is NOT a thread member and will NOT receive thread messages
+- To make the hub a thread member, include `@<hub-name>` in the @mentions of the seed message, where `<hub-name>` is the hub's own CVCV name
+- When `hcom-mcp` is connected, prefer `thread_seed` over raw `hcom send` for thread creation. In bound contexts it can resolve the caller automatically; in the HTTP/unbound path, pass `hub_name` explicitly so the exact hub agent mention is included.
+- For important replies and final outcomes, workers should also `@<hub-name>` explicitly — do not rely on broadcast routing to reach the hub
+
+Because the hub included its own name in the seed, workers can report back reliably:
 
 ```bash
-hcom send --thread "$WF_THREAD" --intent inform -- "DONE: implemented and tested"
+hcom send @<$HUB_NAME> --thread "$WF_THREAD" --intent inform -- "DONE: implemented and tested"
 ```
 
 From the hub, inspect the thread if needed instead of spawning another visible coordinator. Prefer MCP `list_all` for live-agent discovery when available, and do not turn this into a polling loop when workers were already told to report back naturally:
@@ -191,74 +226,28 @@ HCOM_OPENCODE_ARGS="--model openai/gpt-5.4" hcom 1 opencode --tag exec --go --he
 
 When you tell a worker what to do, include these defaults:
 
-- stay on the assigned thread
+- for threaded workflow assignments, stay on the assigned thread
 - keep updates minimal
 - use `request` for assignments, handoffs that need action, and blockers that need a decision
 - use `inform` for status and final outcomes
 - reserve `ack` for explicit acknowledgments tied to a request or reply context
-- report blockers and final outcomes on-thread
+- when a workflow thread exists, report blockers and final outcomes on-thread, @mentioning the hub (`@<hub-name>`) on important replies
 - hand work directly to another tagged role only when the topology requires it
 - stop when the assignment is complete if the task is one-shot
 
-## Common Mistakes
+Bad and good intent example:
 
-| Mistake | Fix |
-|---|---|
-| work might benefit from agents but the skill was never invoked | invoke this skill first whenever the prompt suggests spawning, launching, coordinating, or supervising workers |
-| `hcom-mcp` is connected but raw `hcom` launch commands are used first | use `status`, `list_presets`, `list_topologies`, `launch`, or `launch_topology` first |
-| `hcom-mcp` is connected but `hcom list`, `hcom status`, or other raw control-plane commands are used anyway | use the MCP equivalent such as `list_all`, `status`, `list_managed`, or `inspect`; reserve raw `hcom` for messaging, threads, or explicit shell-only requests |
-| using `hcom listen` to wait for normal worker replies | if workers were told where to report back, end your turn and let incoming hcom messages arrive naturally |
-| repeatedly polling `hcom events --last` after seeding the shared thread | inspect once if needed, otherwise stop and wait for natural report-back |
-| launching extra visible terminals by default | keep the current session visible and spawn workers with `--headless --go` |
-| launching `hcom opencode` again even though the current OpenCode session is already the hub | keep the current session as coordinator and only spawn the workers you need |
-| inventing tag syntax like `--tag @eng-foo` or routing with `@eng-foo` by default | launch with `--tag eng`; route to the group with `@eng-` |
-| routing by fragile generated names | use tags for role routing; use exact names only for a specific known instance |
-| making workers report to a special hub alias every time | seed the thread once, then let workers report on-thread |
-| omitting `--` before the message text in `hcom send` | put every flag before `--`, then the message body |
-| inventing intent names like `assign` | use only `request`, `inform`, and `ack` |
-| using `ack` as generic low-noise status | use `inform` for routine updates; keep `ack` for explicit acknowledgments |
-| putting `--thread` on `hcom opencode` or other spawn commands | put `--thread` on `hcom send` and `hcom events`, not on spawn commands; do not use `hcom listen` for normal worker replies |
-| escalating every handoff back through the hub | allow peer handoffs on the same thread when review or specialization needs it |
-| answering with generic `hcom` commands but no routing defaults | state the hub, headless-worker, thread, and report-flow defaults explicitly |
-| reading config files or using globs to discover saved presets/topologies while `hcom-mcp` is connected | use `list_presets`, `list_topologies`, `status`, and `config_paths` first |
-| using raw launch commands when the real need is a managed preset/topology launch | prefer `launch` or `launch_topology`, then switch to raw `hcom send` for coordination |
+```bash
+# Bad: acking an informational message
+hcom send @zore --intent ack --reply-to 19354 -- "Acknowledged. I will stay available and report important updates to @zore."
 
-## Rationalizations To Reject
+# Good: no reply at all when the inform needs no acknowledgment
 
-| Excuse | Counter-rule |
-|---|---|
-| "This prompt just mentions agents, not hcom" | If the work might benefit from spawning or coordinating agents, invoke this skill first. |
-| "I should inspect `hcom --help` before I decide anything" | If `hcom-mcp` is connected, use MCP discovery tools first. |
-| "Running `hcom list` in bash is fine even though `list_all` exists" | No. If MCP exposes the control-plane operation, use MCP instead of a redundant shell-out. |
-| "I should use `hcom listen` so I don't miss worker replies" | If workers were told to report back, end your turn; replies should arrive naturally. |
-| "I need to keep checking the thread while they work" | Use one shared thread and stop. Inspect only when diagnosing delivery problems or when the user explicitly wants monitoring. |
-| "Generic launch commands are enough" | State the house defaults explicitly: current session stays headed, workers are headless. |
-| "Because the user mentioned OpenCode, I should tell them to run `hcom opencode` again" | If the current OpenCode session is already interactive, it is the hub. Spawn workers, not a second visible coordinator. |
-| "I can route with made-up names like `@eng-codex` or put `@` in the launch tag" | Launch with plain `--tag eng`; route the role group with `@eng-`. |
-| "I should name every worker directly" | Prefer tags for stable role routing; direct names are for one exact instance. |
-| "Workers need a hardcoded hub name to report back" | Seed the thread with `@mentions`, then workers can send on-thread. |
-| "I can invent an intent like `assign` because it reads better" | Only `request`, `inform`, and `ack` are valid hcom intents. |
-| "`ack` is the best default for quiet status updates" | Use `inform` for routine status; use `ack` only for explicit acknowledgments. |
-| "Every update has to come back through me" | Let workers hand off directly when the topology needs it, but keep the thread shared. |
-| "This question needs a script or a team-plan artifact" | Stay in operating-guidance scope unless the user explicitly asks for automation or design artifacts. |
-| "I should read config files or search the repo to discover presets/topologies" | If `hcom-mcp` is connected, use `list_presets`, `list_topologies`, `status`, or `config_paths` instead of filesystem discovery. |
-| "Because this is an hcom question, all launch/discovery should be raw CLI" | Use `hcom-mcp` for the control plane when available; use raw `hcom` for the communication plane. |
+# Good: separate informational follow-up when a status update is actually useful
+hcom send @zore --intent inform -- "Available. I will report important updates here."
+```
 
-## Red Flags
-
-- more than one visible terminal by default
-- launching `hcom opencode` from an already-visible OpenCode session just to create another hub
-- no workflow thread
-- `--thread` on a spawn command
-- role routing without tags
-- worker reports that depend on a fragile generated name
-- filesystem exploration for preset/topology discovery even though `hcom-mcp` is available
-- raw `hcom` launch discovery or spawn commands before MCP discovery in an MCP-connected workspace
-- raw `hcom` control-plane shell-outs such as `hcom list` when `list_all` or another MCP equivalent exists
-- using `hcom listen` while waiting for normal worker reports
-- repeated `hcom events --last` polling after workers were already told where to reply
-- trying to turn `hcom-mcp` into a generic message bus instead of using raw hcom threads
-- turning a usage question into installation support, script authoring, or full team design
+For common mistakes, rationalization counters, and red flags, see `references/discipline.md`.
 
 ## If The User Needs More
 

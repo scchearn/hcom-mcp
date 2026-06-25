@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Syncs hcom skills from this repo to global skill directories.
 # OpenCode: uses symlinks (live).
-# Claude: uses real copies (stable).
+# Claude: uses real copies (stable — Claude Code doesn't resolve symlinked skills).
+# Codex:  uses symlinks (live — Codex CLI supports symlinked skill folders).
 #
 # Usage: install-skills.sh [--force]
 #   --force  Replace pre-existing real directories that are not managed symlinks.
@@ -24,6 +25,7 @@ SKILLS=(hcom hcom-agent-messaging)
 
 OPENCODE_SKILLS_DIR="${HOME}/.config/opencode/skills"
 CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
+CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 
 sync_opencode() {
   local skill="$1"
@@ -85,6 +87,39 @@ sync_claude() {
   echo "[OK] Claude $skill copy created"
 }
 
+sync_codex() {
+  local skill="$1"
+  local src="$REPO_SKILLS_DIR/$skill"
+  local dst="$CODEX_SKILLS_DIR/$skill"
+
+  if [[ ! -d "$CODEX_SKILLS_DIR" ]]; then
+    echo "[SKIP] Codex skills dir not found: $CODEX_SKILLS_DIR"
+    return
+  fi
+
+  if [[ -L "$dst" ]]; then
+    local resolved_dst resolved_src
+    resolved_dst="$(readlink -f "$dst" 2>/dev/null || true)"
+    resolved_src="$(readlink -f "$src" 2>/dev/null || echo "$src")"
+    if [[ "$resolved_dst" == "$resolved_src" ]]; then
+      echo "[OK] Codex $skill symlink already correct"
+      return
+    fi
+    echo "[FIX] Codex $skill symlink points elsewhere, updating"
+    rm "$dst"
+  elif [[ -e "$dst" ]]; then
+    if [[ "$FORCE" != "true" ]]; then
+      echo "[SKIP] Codex $skill: $dst exists but is not a symlink. Run with --force to replace it."
+      return
+    fi
+    echo "[FIX] Codex $skill exists but is not a symlink, replacing (--force)"
+    rm -rf "$dst"
+  fi
+
+  ln -s "$src" "$dst"
+  echo "[OK] Codex $skill symlink created -> $src"
+}
+
 echo "=== hcom skills sync ==="
 echo "Repo canonical: $REPO_SKILLS_DIR"
 echo ""
@@ -92,6 +127,7 @@ echo ""
 for skill in "${SKILLS[@]}"; do
   sync_opencode "$skill"
   sync_claude "$skill"
+  sync_codex "$skill"
 done
 
 echo ""

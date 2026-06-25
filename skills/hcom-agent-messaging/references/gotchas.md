@@ -154,6 +154,14 @@ The bootstrap teaches agents: `request -> always respond`, `inform -> respond on
 | `@mentions` | Target specific agents | Controls delivery scope |
 | Broadcast (no @) | Everyone needs to see | Delivers to all active/listening agents |
 
+### Thread membership and sender exclusion
+
+- The **sender** of a message is never included in `delivered_to`, even if the sender @mentions themselves
+- A thread is a namespace — membership is not locked to the seed. Each message's @mentions determine that message's delivery
+- `hcom send --thread X` as broadcast (no @mentions) reuses the last-seed member list, but this is unreliable for hub routing
+- **If a hub creates a thread by sending `@eng- @review-`, the hub is NOT a thread member.** The hub must @mention itself (e.g., `@muho` — the hub's CVCV name) on the seed message to receive thread messages
+- For hub-spoke patterns: always include `@<hub-name>` (the hub's CVCV name from the hcom system context) in the seed @mentions, and tell workers to `@<hub-name>` on important replies
+
 ## TTY/PTY Issues
 
 **Agent shows as "blocked" in hcom list:**
