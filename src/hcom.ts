@@ -73,6 +73,23 @@ export function parseHcomJson<T>(raw: string): T | null {
 }
 
 /**
+ * Resolve the hcom CVCV name of the calling agent/session.
+ * Uses `hcom list self --json` if no override is provided.
+ * Returns undefined if the caller cannot be resolved (unbound session).
+ */
+export async function resolveCallerName(override?: string): Promise<string | undefined> {
+  if (override) return override;
+
+  const result = await execHcom(["list", "self", "--json"]);
+  if (result.exitCode === 0) {
+    const parsed = parseHcomJson<{ name?: string }>(result.stdout);
+    return parsed?.name ?? undefined;
+  }
+
+  return undefined;
+}
+
+/**
  * Load all live hcom agents as reported by `hcom list --json`.
  */
 export async function listHcomAgents(): Promise<HcomAgent[]> {
@@ -99,6 +116,19 @@ export function findLiveAgentByIdentifier(
 }
 
 // --- Model discovery helpers ---
+
+/**
+ * Infer the harness enum from an HcomAgent.tool value.
+ * Returns null for unknown/undefined tool values.
+ */
+export function inferHarnessFromTool(tool: string | undefined): Harness | null {
+  if (!tool) return null;
+  // HcomAgent.tool matches HarnessEnum values directly: "opencode", "claude", "codex"
+  if (HarnessEnum.options.includes(tool as Harness)) {
+    return tool as Harness;
+  }
+  return null;
+}
 
 export interface ModelDiscoveryResult {
   harness: Harness;

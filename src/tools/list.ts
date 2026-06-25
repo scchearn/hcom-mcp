@@ -11,7 +11,7 @@ import {
   getRecordsByWorkspace,
   updateRecordState,
 } from "../registry.js";
-import type { HcomAgent, RegistryRecord } from "../types.js";
+import type { HcomAgent, OwnershipState, RegistryRecord } from "../types.js";
 
 export function matchLiveAgent(
   record: Pick<RegistryRecord, "hcomName">,
@@ -33,13 +33,38 @@ export function reconcileManagedRecords(
       return record;
     }
 
-    if (record.state === "managed_lost" || record.state === "managed_stopped") {
+    const liveAgent = matchLiveAgent(record, hcomAgents);
+
+    // Reverse reconcile stopped→active for both managed and adopted
+    if (
+      (record.state === "managed_stopped" || record.state === "adopted_stopped") &&
+      liveAgent
+    ) {
+      const newState = record.state === "managed_stopped" ? "managed_active" : "adopted_active";
+      return { ...record, state: newState as OwnershipState };
+    }
+
+    // For managed_lost, skip further transitions (preserve existing behavior)
+    if (record.state === "managed_lost") {
       return record;
     }
 
-    return matchLiveAgent(record, hcomAgents)
-      ? record
-      : { ...record, state: "managed_lost" as const };
+    // For adopted_lost, skip further transitions
+    if (record.state === "adopted_lost") {
+      return record;
+    }
+
+    // Managed active but not found live → managed_lost
+    if (record.state === "managed_active" && !liveAgent) {
+      return { ...record, state: "managed_lost" as const };
+    }
+
+    // Adopted active but not found live → adopted_lost
+    if (record.state === "adopted_active" && !liveAgent) {
+      return { ...record, state: "adopted_lost" as const };
+    }
+
+    return record;
   });
 }
 
@@ -53,8 +78,22 @@ function persistReconciledState(before: RegistryRecord[], after: RegistryRecord[
 
 function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgent[]) {
   const liveAgent = matchLiveAgent(record, hcomAgents);
+
+  let managementType: string;
+  if (
+    record.state.startsWith("adopted_") ||
+    record.preset === "adopted"
+  ) {
+    managementType = "adopted";
+  } else if (record.state.startsWith("managed_")) {
+    managementType = "managed";
+  } else {
+    managementType = "managed";
+  }
+
   return {
     ...record,
+    managementType,
     liveFound: Boolean(liveAgent),
     liveName: liveAgent?.name ?? null,
     liveBaseName: liveAgent?.base_name ?? null,
@@ -107,8 +146,36 @@ export function registerListAllTool(server: any) {
     async () => {
       try {
         const agents = await listHcomAgents();
+        const cwd = process.cwd();
+        const records = getOwnedRecordsByWorkspace(cwd);
+
+        const agentsWithStatus = agents.map((agent) => {
+          const record = records.find(
+            (r) => r.hcomName === agent.name || r.hcomName === agent.base_name,
+          );
+
+          let managementStatus: string;
+          if (!record) {
+            managementStatus = "unmanaged";
+          } else if (
+            record.state.startsWith("adopted_") ||
+            record.preset === "adopted"
+          ) {
+            managementStatus = "adopted";
+          } else if (record.state.startsWith("managed_")) {
+            managementStatus = "managed";
+          } else {
+            managementStatus = "unmanaged";
+          }
+
+          return { ...agent, managementStatus };
+        });
+
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ agents, total: agents.length }, null, 2) }],
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ agents: agentsWithStatus, total: agentsWithStatus.length }, null, 2),
+          }],
         };
       } catch (err: any) {
         return {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { execHcom, listHarnessModels } from "../hcom.js";
+import { execHcom, listHarnessModels, resolveCallerName } from "../hcom.js";
 import type { ExecOptions, ModelDiscoveryResult } from "../hcom.js";
 import { loadMergedConfig, resolveAgentPreset, resolveTopologyPreset, validateTopologyReferences } from "../config.js";
 import { addRecord, removeRecords } from "../registry.js";
@@ -118,9 +118,10 @@ export function registerLaunchTool(server: any) {
       tag: z.string().optional().describe("Tag for the agent (defaults to harness name for bare launches)"),
       dir: z.string().optional().describe("Working directory override"),
       workspace: z.string().optional().describe("Workspace path for ownership tracking"),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
       reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, reasoning }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning }: {
       harness: Harness;
       preset?: string;
       model?: string;
@@ -128,11 +129,24 @@ export function registerLaunchTool(server: any) {
       tag?: string;
       dir?: string;
       workspace?: string;
+      sender_name?: string;
       reasoning?: string;
     }) => {
       const cwd = workspace ?? process.cwd();
 
       try {
+        const callerName = await resolveCallerName(sender_name);
+
+        if (!callerName) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+            }],
+            isError: true,
+          };
+        }
+
         // Require at least preset or model
         if (!presetName && !model) {
           return {
@@ -185,7 +199,7 @@ export function registerLaunchTool(server: any) {
           // Resolve effective prompt upstream
           resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
 
-          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd);
+          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName);
           return {
             content: [{
               type: "text" as const,
@@ -207,7 +221,7 @@ export function registerLaunchTool(server: any) {
             reasoning,
           };
 
-          const result = await launchAgent(resolvedPreset, { dir }, cwd);
+          const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName);
           return {
             content: [{
               type: "text" as const,
@@ -235,14 +249,26 @@ export function registerTopologyLaunchTool(server: any) {
     {
       topology: z.string().describe("Name of the topology preset from config"),
       workspace: z.string().optional().describe("Workspace path for ownership tracking"),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
     },
-    async ({ topology: topologyName, workspace }: {
+    async ({ topology: topologyName, workspace, sender_name }: {
       topology: string;
       workspace?: string;
+      sender_name?: string;
     }) => {
       const cwd = workspace ?? process.cwd();
 
       try {
+        const callerName = await resolveCallerName(sender_name);
+        if (!callerName) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+            }],
+            isError: true,
+          };
+        }
         const config = loadMergedConfig(cwd);
         const topology = resolveTopologyPreset(config, topologyName);
 
@@ -306,7 +332,7 @@ export function registerTopologyLaunchTool(server: any) {
 
         for (const { role, resolved } of resolvedRoles) {
           try {
-            const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache);
+            const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache, callerName);
             launched.push(result);
             registryIds.push(...result.registryIds);
           } catch (err: any) {
@@ -354,7 +380,8 @@ async function launchAgent(
   preset: ResolvedLaunchPreset,
   overrides: { prompt?: string; dir?: string },
   workspace: string,
-  catalogCache: ModelCatalogCache = new Map()
+  catalogCache: ModelCatalogCache = new Map(),
+  launchedBy?: string
 ): Promise<LaunchResult> {
   const validationError = await validatePresetModelAvailability(preset, catalogCache);
   if (validationError) {
@@ -387,12 +414,18 @@ async function launchAgent(
     args.push("--dir", overrides.dir ?? preset.dir!);
   }
 
-  if (preset.prompt) {
-    args.push("--hcom-prompt", preset.prompt);
-  }
-
   if (preset.systemPrompt) {
-    args.push("--hcom-system-prompt", preset.systemPrompt);
+    if (preset.harness === "opencode") {
+      const merged = `[System Role] ${preset.systemPrompt}\n\n${preset.prompt ?? ""}`.trim();
+      args.push("--hcom-prompt", merged);
+    } else {
+      args.push("--hcom-system-prompt", preset.systemPrompt);
+      if (preset.prompt) {
+        args.push("--hcom-prompt", preset.prompt);
+      }
+    }
+  } else if (preset.prompt) {
+    args.push("--hcom-prompt", preset.prompt);
   }
 
   if (preset.reasoning) {
@@ -407,7 +440,7 @@ async function launchAgent(
 
   if (preset.headless !== false) {
     if (preset.harness === "codex") {
-      args.push("--full-auto");
+      args.push("--sandbox", "danger-full-access");
     } else if (preset.harness === "claude") {
       args.push("--dangerously-skip-permissions");
     }
@@ -469,6 +502,7 @@ async function launchAgent(
       launchMode: preset.headless !== false ? "headless" : "headed",
       state: "managed_active",
       released: false,
+      launchedBy,
     })
   );
 

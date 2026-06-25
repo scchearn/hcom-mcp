@@ -6,6 +6,7 @@ import {
   RegistryRecordSchema,
   type RegistryRecord,
   type OwnershipState,
+  type Harness,
 } from "./types.js";
 
 export const REGISTRY_DIR = join(homedir(), ".hcom", "mcp");
@@ -126,6 +127,110 @@ export function removeRecords(ids: string[]): void {
  */
 export function getActiveRecords(workspace: string): RegistryRecord[] {
   return getRecordsByWorkspace(workspace).filter(
-    (r) => !r.released && r.state !== "managed_lost"
+    (r) => !r.released && r.state !== "managed_lost" && r.state !== "adopted_lost"
   );
+}
+
+/**
+ * Create an adopted record for an existing hcom agent.
+ * Adopted records have preset "adopted", state "adopted_active", and no launch metadata.
+ */
+export function adoptRecord(params: {
+  workspace: string;
+  harness: Harness;
+  hcomName: string;
+  sessionId?: string;
+}): RegistryRecord {
+  const registry = loadRegistry();
+  const now = new Date().toISOString();
+  const full: RegistryRecord = {
+    id: randomUUID(),
+    workspace: params.workspace,
+    harness: params.harness,
+    hcomName: params.hcomName,
+    sessionId: params.sessionId,
+    preset: "adopted",
+    state: "adopted_active",
+    // Adopted records have no launch metadata
+    launchedBy: undefined,
+    topology: undefined,
+    topologyRole: undefined,
+    createdAt: now,
+    lastSeenAt: now,
+    released: false,
+  };
+  registry.records.push(full);
+  saveRegistry(registry);
+  return full;
+}
+
+/**
+ * Find the first non-released record matching workspace + hcomName.
+ * Used for idempotency checks in adopt.
+ */
+export function findRecordByWorkspaceAndName(
+  workspace: string,
+  hcomName: string,
+): RegistryRecord | undefined {
+  const registry = loadRegistry();
+  return registry.records.find(
+    (r) => r.workspace === workspace && r.hcomName === hcomName && !r.released,
+  );
+}
+
+/**
+ * Prune stale registry records based on state and age.
+ * Returns the list of records that would be (or were) removed.
+ */
+export function pruneRecords(
+  workspace: string,
+  options: {
+    olderThanDays?: number;
+    includeStopped?: boolean;
+    stoppedOlderThanDays?: number;
+    confirm?: boolean;
+  } = {},
+): { removed: RegistryRecord[]; wouldRemove: RegistryRecord[] } {
+  const {
+    olderThanDays = 7,
+    includeStopped = false,
+    stoppedOlderThanDays = 30,
+    confirm = false,
+  } = options;
+
+  const registry = loadRegistry();
+  const now = Date.now();
+
+  const lostStates: OwnershipState[] = ["managed_lost", "adopted_lost"];
+  const stoppedStates: OwnershipState[] = ["managed_stopped", "adopted_stopped"];
+  const protectedStates: OwnershipState[] = ["managed_active", "adopted_active", "managed_released", "managed_blocked"];
+
+  const workspaceRecords = registry.records.filter((r) => r.workspace === workspace);
+
+  function isOlderThan(record: RegistryRecord, days: number): boolean {
+    const lastSeen = new Date(record.lastSeenAt).getTime();
+    return now - lastSeen > days * 24 * 60 * 60 * 1000;
+  }
+
+  const toRemove: RegistryRecord[] = [];
+
+  for (const record of workspaceRecords) {
+    // Never prune active/released/blocked records
+    if (protectedStates.includes(record.state)) continue;
+
+    if (lostStates.includes(record.state) && isOlderThan(record, olderThanDays)) {
+      toRemove.push(record);
+    } else if (includeStopped && stoppedStates.includes(record.state) && isOlderThan(record, stoppedOlderThanDays)) {
+      toRemove.push(record);
+    }
+  }
+
+  if (confirm) {
+    const removeIds = new Set(toRemove.map((r) => r.id));
+    registry.records = registry.records.filter((r) => !removeIds.has(r.id));
+    saveRegistry(registry);
+    return { removed: toRemove, wouldRemove: [] };
+  }
+
+  return { removed: [], wouldRemove: toRemove };
 }

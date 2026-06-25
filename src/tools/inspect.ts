@@ -5,7 +5,7 @@ import { getOwnedRecordsByWorkspace } from "../registry.js";
 export function registerInspectTool(server: any) {
   server.tool(
     "inspect",
-    "Inspect a managed agent: status, transcript, events, or terminal screen",
+    "Inspect any live hcom agent: status, transcript, events, or terminal screen. Returns managementStatus (managed/adopted/unmanaged) along with inspect data.",
     {
       name: z.string().describe("hcom agent name to inspect"),
       aspect: z.enum(["status", "transcript", "events", "term"]).describe("What to inspect"),
@@ -21,20 +21,31 @@ export function registerInspectTool(server: any) {
       const cwd = workspace ?? process.cwd();
 
       try {
-        // Verify ownership
-        const records = getOwnedRecordsByWorkspace(cwd);
-        const owned = records.find((r) => r.hcomName === name);
-        if (!owned) {
-          const liveAgent = findLiveAgentByIdentifier(name, await listHcomAgents());
+        // Verify agent exists in hcom
+        const allAgents = await listHcomAgents();
+        const liveAgent = findLiveAgentByIdentifier(name, allAgents);
+        if (!liveAgent) {
           return {
             content: [{
               type: "text" as const,
-              text: liveAgent
-                ? `Error: Agent "${name}" exists in hcom as "${liveAgent.name}" but is not managed by this server in workspace "${cwd}". Managed agents: ${records.map((r) => r.hcomName).filter(Boolean).join(", ") || "none"}`
-                : `Error: Agent "${name}" is not managed by this server in workspace "${cwd}". Managed agents: ${records.map((r) => r.hcomName).filter(Boolean).join(", ") || "none"}`,
+              text: `Error: Agent "${name}" not found in hcom`,
             }],
             isError: true,
           };
+        }
+
+        // Determine management status
+        const records = getOwnedRecordsByWorkspace(cwd);
+        const owned = records.find((r) => r.hcomName === liveAgent.name);
+        let managementStatus: "managed" | "adopted" | "unmanaged";
+        if (owned) {
+          if (owned.state.startsWith("adopted_") || owned.preset === "adopted") {
+            managementStatus = "adopted";
+          } else {
+            managementStatus = "managed";
+          }
+        } else {
+          managementStatus = "unmanaged";
         }
 
         let result;
@@ -82,10 +93,16 @@ export function registerInspectTool(server: any) {
           }
         }
 
+        const responsePayload = {
+          agent: liveAgent.name,
+          managementStatus,
+          inspect: result,
+        };
+
         return {
           content: [{
             type: "text" as const,
-            text: typeof result === "string" ? result : JSON.stringify(result, null, 2),
+            text: JSON.stringify(responsePayload, null, 2),
           }],
         };
       } catch (err: any) {
