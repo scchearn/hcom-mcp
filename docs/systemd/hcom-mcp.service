@@ -1,0 +1,14 @@
+[Unit]
+Description=hcom-mcp HTTP MCP server
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node %h/.local/share/hcom-mcp/dist/index.js
+Restart=on-failure
+RestartSec=3
+Environment=HCOM_MCP_PORT=3111
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

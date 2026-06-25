@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows Task Scheduler definition for hcom-mcp.
+  Import via:
+    schtasks /Create /TN hcom-mcp /XML hcom-mcp-task.xml
+
+  Or use nssm (simpler):
+    nssm install hcom-mcp "C:\Program Files\nodejs\node.exe" "C:\Users\USERNAME\.local\share\hcom-mcp\dist\index.js"
+    nssm set hcom-mcp AppEnvironmentExtra HCOM_MCP_PORT=3111
+    nssm start hcom-mcp
+-->
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>hcom-mcp HTTP MCP server</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Settings>
+    <RestartOnFailure>
+      <Interval>PT3S</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>"C:\Program Files\nodejs\node.exe"</Command>
+      <Arguments>"C:\Users\USERNAME\.local\share\hcom-mcp\dist\index.js"</Arguments>
+    </Exec>
+  </Actions>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+</Task>
