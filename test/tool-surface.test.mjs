@@ -361,6 +361,9 @@ test('adopt errors clearly when sender_name is missing for stateless HTTP caller
       listHcomAgents: async () => [{ name: 'zore', base_name: 'zore', tool: 'opencode', session_id: 'sess-1' }],
       findLiveAgentByIdentifier: () => ({ name: 'zore', base_name: 'zore', tool: 'opencode', session_id: 'sess-1' }),
       inferHarnessFromTool: () => 'opencode',
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when sender identity is missing');
+      },
     },
   });
 
