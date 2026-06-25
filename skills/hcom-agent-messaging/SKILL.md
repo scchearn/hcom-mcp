@@ -3,7 +3,7 @@ name: hcom-agent-messaging
 description: >
   Use when setting up hcom, troubleshooting delivery or hooks, checking
   install state, or writing reusable multi-agent scripts across Claude
-  Code, Gemini, Codex, or OpenCode. Use the separate `hcom` skill for
+  Code, Gemini, Codex, or OpenCode. Use the separate `using-hcom` skill for
   practical current-session coordination patterns and house defaults.
 ---
 
@@ -11,7 +11,7 @@ description: >
 
 AI agents running in separate terminals are isolated. hcom connects them via hooks and a shared database so they can message, watch, and spawn each other in real-time.
 
-If the user wants a quick operating pattern from the current session, one headed hub with mostly headless workers, or practical thread and handoff defaults, use the separate `hcom` skill instead of this one.
+If the user wants a quick operating pattern from the current session, one headed hub with mostly headless workers, or practical thread and handoff defaults, use the separate `using-hcom` skill instead of this one.
 
 ```bash
 curl -fsSL https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.sh | sh

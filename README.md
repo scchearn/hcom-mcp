@@ -66,9 +66,15 @@ Point any HTTP-capable MCP client at `http://127.0.0.1:3111/mcp`. Example for Cl
 
 ## Skills
 
-Operating guidance for the `hcom` communication plane and the `hcom-mcp` control plane ships in `skills/`:
+Install with:
 
-- `skills/hcom/SKILL.md` — messaging, threads, transcripts, event watching
+```bash
+npx skills add scchearn/hcom-mcp
+```
+
+Operating guidance ships in `skills/`:
+
+- `skills/using-hcom/SKILL.md` — messaging, threads, transcripts, event watching
 - `skills/hcom-agent-messaging/SKILL.md` — agent-to-agent messaging patterns and gotchas
 
 ## Tools

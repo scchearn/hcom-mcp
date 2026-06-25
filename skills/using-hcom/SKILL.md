@@ -1,5 +1,5 @@
 ---
-name: hcom
+name: using-hcom
 description: Use when the user wants to spawn an agent, coordinate, route, or supervise agents via hcom or hcom-mcp, or when a task would clearly benefit from delegating to a headless worker. Not for installation, troubleshooting, reusable hcom scripts (→ hcom-agent-messaging), or full team-topology design (→ do-agents).
 ---
 
@@ -42,6 +42,31 @@ If the user explicitly asks for a reusable script, workflow automation, or `hcom
 ## When `hcom-mcp` Is Available
 
 Use MCP first for discovery, launch, and managed-fleet state. Use raw `hcom` once workers exist and the workflow is moving.
+
+```dot
+digraph mcp_vs_raw {
+  rankdir=TB;
+  node [shape=box];
+
+  "Need to do something" [shape=diamond];
+  "Is hcom-mcp connected?" [shape=diamond];
+  "Control-plane task?\n(discovery, launch, inspect,\nstop/kill, thread_seed)" [shape=diamond];
+  "Use MCP tool" [shape=box];
+  "Communication task?\n(send, events, transcript)" [shape=diamond];
+  "Use raw hcom" [shape=box];
+  "MCP has the operation?" [shape=diamond];
+  "Fall back to raw hcom" [shape=box];
+
+  "Need to do something" -> "Is hcom-mcp connected?";
+  "Is hcom-mcp connected?" -> "Control-plane task?\n(discovery, launch, inspect,\nstop/kill, thread_seed)" [label="yes"];
+  "Is hcom-mcp connected?" -> "Use raw hcom" [label="no"];
+  "Control-plane task?\n(discovery, launch, inspect,\nstop/kill, thread_seed)" -> "MCP has the operation?" [label="yes"];
+  "Control-plane task?\n(discovery, launch, inspect,\nstop/kill, thread_seed)" -> "Communication task?\n(send, events, transcript)" [label="no"];
+  "MCP has the operation?" -> "Use MCP tool" [label="yes"];
+  "MCP has the operation?" -> "Fall back to raw hcom" [label="no"];
+  "Communication task?\n(send, events, transcript)" -> "Use raw hcom" [label="yes"];
+}
+```
 
 | Need | Preferred surface |
 |---|---|
@@ -143,67 +168,19 @@ Recommended order when `hcom-mcp` is connected:
 
 ## Waiting For Worker Replies
 
-After you launch workers and seed the shared thread, the normal waiting behavior is to stop and let hcom messages arrive naturally.
+After you launch workers and seed the shared thread, end your turn and let hcom messages arrive naturally. Do not use `hcom listen` or poll `hcom events --last` in a loop.
 
-Rules:
-
-- do not use `hcom listen` to wait for ordinary worker replies after you already told them where to report back
-- do not poll `hcom events --last` in a loop just to wait for results
-- use `hcom events` or `hcom transcript` for message-flow inspection, and use MCP tools such as `list_all` or `inspect` for control-plane inspection; do not default to raw `hcom list` when an MCP equivalent exists
-- if workers were instructed to reply on-thread to the hub/current session, end your turn and let incoming `<hcom>` messages wake the session naturally
-
-For worked examples of MCP-first launch flow and common bad/good waiting patterns, see `references/examples.md`.
-
-```bash
-WF_THREAD="repo-task-$(date +%s)"
-
-hcom send @<$HUB_NAME> @eng- @review- --thread "$WF_THREAD" --intent inform -- \
-  "Use this thread only for the repo-task workflow. Hub (@<$HUB_NAME>) receives all thread updates. Keep updates concise. Peer handoffs are allowed only when they help the task move forward."
-
-hcom send @eng- --thread "$WF_THREAD" --intent request -- \
-  "Implement the change. Report blockers or final outcome to @<$HUB_NAME> on this thread."
-
-hcom send @review- --thread "$WF_THREAD" --intent request -- \
-  "Review the engineer's work on this thread. Send APPROVED or FIX to @<$HUB_NAME> on-thread."
-```
+For worked examples of MCP-first launch flow and bad/good waiting patterns, see `references/examples.md`.
 
 `$HUB_NAME` is the hub's own CVCV name (4 letters, e.g. `muho`). It is available from the hcom system context (`Your name: muho`) or from `hcom list`. Use the real name, not a tag — there is no `hub` tag unless you explicitly launched with `--tag hub`.
 
 ### How Threads Work
 
-- A thread is a **name** for a conversation namespace, not a fixed membership group
-- @mentions on **each individual message** determine that message's delivery — the seed does not lock membership
-- `hcom send --thread X` as broadcast (no @mentions) reuses the last-seed member list, but this is unreliable for hub routing
+- A thread is a **name** for a conversation namespace, not a fixed membership group — @mentions on each individual message determine delivery, not the seed
 - **The sender is never included in `delivered_to`** — if the hub creates a thread by sending `@eng- @review-`, the hub is NOT a thread member and will NOT receive thread messages
-- To make the hub a thread member, include `@<hub-name>` in the @mentions of the seed message, where `<hub-name>` is the hub's own CVCV name
-- When `hcom-mcp` is connected, prefer `thread_seed` over raw `hcom send` for thread creation. In bound contexts it can resolve the caller automatically; in the HTTP/unbound path, pass `hub_name` explicitly so the exact hub agent mention is included.
-- For important replies and final outcomes, workers should also `@<hub-name>` explicitly — do not rely on broadcast routing to reach the hub
+- To make the hub a thread member, include `@<hub-name>` in the seed @mentions; when `hcom-mcp` is connected, prefer `thread_seed` over raw `hcom send` for thread creation (pass `hub_name` explicitly in the HTTP/unbound path)
 
-Because the hub included its own name in the seed, workers can report back reliably:
-
-```bash
-hcom send @<$HUB_NAME> --thread "$WF_THREAD" --intent inform -- "DONE: implemented and tested"
-```
-
-From the hub, inspect the thread if needed instead of spawning another visible coordinator. Prefer MCP `list_all` for live-agent discovery when available, and do not turn this into a polling loop when workers were already told to report back naturally:
-
-```bash
-hcom events --sql "msg_thread='${WF_THREAD}'" --last 20
-```
-
-Use peer-to-peer handoff only when needed, and keep it on the same thread:
-
-```bash
-hcom send @review- --thread "$WF_THREAD" --intent request -- \
-  "Review the latest engineer result on this thread and reply with APPROVED or FIX."
-```
-
-Important syntax rules:
-
-- launch tags are plain names such as `--tag eng` or `--tag review`
-- routed sends use the real hcom group form `@<tag>-`, such as `@eng-` or `@review-`
-- use only valid intents: `request`, `inform`, `ack`
-- put `--` before the message text in every `hcom send` command
+For common mistakes, rationalization counters, and red flags, see `references/discipline.md`.
 
 ## Cross-Tool Launch Patterns
 

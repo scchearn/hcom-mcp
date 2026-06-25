@@ -1,0 +1,7 @@
+{
+  "name": "hcom-mcp",
+  "description": "Control-plane MCP server for launching and supervising hcom-managed agents. Ships hcom coordination and messaging skills.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": "https://github.com/scchearn/hcom-mcp"
+}
