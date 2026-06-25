@@ -9,11 +9,14 @@ import {
   registerTopologyLaunchTool,
   validatePresetModelAvailability,
 } from '../dist/tools/launch.js';
+import { registerThreadInspectTool, registerThreadSeedTool } from '../dist/tools/threads.js';
 import * as listModule from '../dist/tools/list.js';
 import { registerListModelsTool, registerModelResources } from '../dist/tools/models.js';
 import * as hcomModule from '../dist/hcom.js';
 import { registerInspectTool } from '../dist/tools/inspect.js';
 import { registerLifecycleTools } from '../dist/tools/lifecycle.js';
+import { registerAdoptTool } from '../dist/tools/adopt.js';
+import { registerPruneTool } from '../dist/tools/prune.js';
 import * as configModule from '../dist/config.js';
 
 const { registerListManagedTool, matchLiveAgent, reconcileManagedRecords } = listModule;
@@ -59,11 +62,390 @@ test('registerTopologyLaunchTool exposes the bare launch_topology name', () => {
   assert.deepEqual(server.names, ['launch_topology']);
 });
 
+test('registerThreadSeedTool exposes the bare thread_seed name', () => {
+  const server = createFakeServer();
+  registerThreadSeedTool(server);
+  assert.deepEqual(server.names, ['thread_seed']);
+});
+
+test('registerThreadInspectTool exposes the bare thread_inspect name', () => {
+  const server = createFakeServer();
+  registerThreadInspectTool(server);
+  assert.deepEqual(server.names, ['thread_inspect']);
+});
+
+test('thread_seed errors clearly when hub_name is missing for unresolved HTTP or unbound callers', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when hub resolution fails');
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerThreadSeedTool } = await import('../dist/tools/threads.js?' + Date.now());
+  const server = createFakeServer();
+  registerThreadSeedTool(server);
+
+  const response = await server.handlers.get('thread_seed')({
+    thread_name: 'wf-1',
+    mentions: ['@eng-'],
+    message: 'seed',
+    sender_name: 'nora',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /hub_name/i);
+  assert.match(response.content[0].text, /http|unbound/i);
+});
+
+test('thread_seed errors clearly when sender_name is missing for stateless HTTP callers', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when sender identity is missing');
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerThreadSeedTool } = await import('../dist/tools/threads.js?' + Date.now());
+  const server = createFakeServer();
+  registerThreadSeedTool(server);
+
+  const response = await server.handlers.get('thread_seed')({
+    thread_name: 'wf-sender-missing',
+    mentions: ['@eng-'],
+    message: 'seed',
+    hub_name: 'zore',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /sender_name/i);
+});
+
+test('thread_seed prepends exact hub mention when absent', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override ?? 'zore',
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: 'ok', stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerThreadSeedTool } = await import('../dist/tools/threads.js?' + Date.now());
+  const server = createFakeServer();
+  registerThreadSeedTool(server);
+
+  const response = await server.handlers.get('thread_seed')({
+    thread_name: 'wf-2',
+    mentions: ['@eng-'],
+    message: 'seed',
+    sender_name: 'nora',
+    hub_name: 'zore',
+  });
+
+  assert.ok(!response.isError, response?.content?.[0]?.text);
+  assert.deepEqual(capturedArgs.slice(0, 6), ['send', '@zore', '@eng-', '--name', 'nora', '--thread']);
+  const payload = JSON.parse(response.content[0].text);
+  assert.equal(payload.sender_name, 'nora');
+  assert.deepEqual(payload.mentions, ['@zore', '@eng-']);
+});
+
+test('thread_seed does not duplicate an exact hub mention', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override ?? 'zore',
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: 'ok', stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerThreadSeedTool } = await import('../dist/tools/threads.js?' + Date.now());
+  const server = createFakeServer();
+  registerThreadSeedTool(server);
+
+  const response = await server.handlers.get('thread_seed')({
+    thread_name: 'wf-3',
+    mentions: ['@zore', '@eng-'],
+    message: 'seed',
+    sender_name: 'nora',
+    hub_name: 'zore',
+  });
+
+  assert.ok(!response.isError, response?.content?.[0]?.text);
+  assert.deepEqual(capturedArgs.slice(0, 6), ['send', '@zore', '@eng-', '--name', 'nora', '--thread']);
+  const payload = JSON.parse(response.content[0].text);
+  assert.deepEqual(payload.mentions, ['@zore', '@eng-']);
+});
+
+test('thread_seed does not treat hub tag syntax as equivalent to the exact hub mention', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override ?? 'zore',
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: 'ok', stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerThreadSeedTool } = await import('../dist/tools/threads.js?' + Date.now());
+  const server = createFakeServer();
+  registerThreadSeedTool(server);
+
+  const response = await server.handlers.get('thread_seed')({
+    thread_name: 'wf-4',
+    mentions: ['@zore-', '@eng-'],
+    message: 'seed',
+    sender_name: 'nora',
+    hub_name: 'zore',
+  });
+
+  assert.ok(!response.isError, response?.content?.[0]?.text);
+  assert.deepEqual(capturedArgs.slice(0, 7), ['send', '@zore', '@zore-', '@eng-', '--name', 'nora', '--thread']);
+  const payload = JSON.parse(response.content[0].text);
+  assert.deepEqual(payload.mentions, ['@zore', '@zore-', '@eng-']);
+});
+
+test('thread_seed passes through explicit intent', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override ?? 'zore',
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: 'ok', stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerThreadSeedTool } = await import('../dist/tools/threads.js?' + Date.now());
+  const server = createFakeServer();
+  registerThreadSeedTool(server);
+
+  const response = await server.handlers.get('thread_seed')({
+    thread_name: 'wf-5',
+    mentions: ['@eng-'],
+    message: 'seed',
+    intent: 'request',
+    sender_name: 'nora',
+    hub_name: 'zore',
+  });
+
+  assert.ok(!response.isError, response?.content?.[0]?.text);
+  const intentIndex = capturedArgs.indexOf('--intent');
+  assert.equal(capturedArgs[intentIndex + 1], 'request');
+});
+
+test('thread_inspect remains senderless for read-only HTTP MCP calls', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: '{"ok":true}', stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerThreadInspectTool } = await import('../dist/tools/threads.js?' + Date.now());
+  const server = createFakeServer();
+  registerThreadInspectTool(server);
+
+  const response = await server.handlers.get('thread_inspect')({
+    thread_name: 'wf-read-only',
+  });
+
+  assert.ok(!response.isError, response?.content?.[0]?.text);
+  assert.deepEqual(capturedArgs, ['events', '--thread', 'wf-read-only', '--last', '20']);
+});
+
+test('launch errors clearly when sender_name is missing for stateless HTTP callers', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when sender identity is missing');
+      },
+      listHarnessModels: async (harness) => [{ harness, status: 'live', source: 'mock', models: ['sonnet'], count: 1 }],
+    },
+  });
+
+  const { registerLaunchTool } = await import('../dist/tools/launch.js?' + Date.now());
+  const server = createFakeServer();
+  registerLaunchTool(server);
+
+  const response = await server.handlers.get('launch')({
+    harness: 'claude',
+    model: 'sonnet',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /sender_name/i);
+});
+
+test('launch_topology errors clearly when sender_name is missing for stateless HTTP callers', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when sender identity is missing');
+      },
+      listHarnessModels: async (harness) => [{ harness, status: 'live', source: 'mock', models: ['haiku'], count: 1 }],
+    },
+  });
+
+  t.mock.module('../dist/config.js', {
+    namedExports: {
+      loadMergedConfig: () => ({
+        agentPresets: {
+          reviewer: {
+            name: 'reviewer',
+            harness: { claude: { model: 'haiku' } },
+            headless: true,
+            pty: false,
+          },
+        },
+        topologyPresets: {
+          swarm: {
+            name: 'swarm',
+            roles: [{ role: 'review', preset: 'reviewer', harness: 'claude', count: 1 }],
+          },
+        },
+      }),
+      resolveAgentPreset: (config, name) => config.agentPresets[name] || null,
+      resolveTopologyPreset: (config, name) => config.topologyPresets[name] || null,
+      validateTopologyReferences: () => [],
+    },
+  });
+
+  const { registerTopologyLaunchTool } = await import('../dist/tools/launch.js?' + Date.now());
+  const server = createFakeServer();
+  registerTopologyLaunchTool(server);
+
+  const response = await server.handlers.get('launch_topology')({
+    topology: 'swarm',
+    workspace: '/repo',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /sender_name/i);
+});
+
+test('adopt errors clearly when sender_name is missing for stateless HTTP callers', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      listHcomAgents: async () => [{ name: 'zore', base_name: 'zore', tool: 'opencode', session_id: 'sess-1' }],
+      findLiveAgentByIdentifier: () => ({ name: 'zore', base_name: 'zore', tool: 'opencode', session_id: 'sess-1' }),
+      inferHarnessFromTool: () => 'opencode',
+    },
+  });
+
+  const { registerAdoptTool } = await import('../dist/tools/adopt.js?' + Date.now());
+  const server = createFakeServer();
+  registerAdoptTool(server);
+
+  const response = await server.handlers.get('adopt')({
+    name: 'zore',
+    workspace: '/repo',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /sender_name/i);
+});
+
+test('stop errors clearly when sender_name is missing for stateless HTTP callers', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      listHcomAgents: async () => [{ name: 'zore', base_name: 'zore', status: 'listening' }],
+      findLiveAgentByIdentifier: () => ({ name: 'zore', base_name: 'zore', status: 'listening' }),
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when sender identity is missing');
+      },
+    },
+  });
+
+  t.mock.module('../dist/registry.js', {
+    namedExports: {
+      getOwnedRecordsByWorkspace: () => [{ id: 'rec-1', hcomName: 'zore', state: 'managed_active' }],
+      updateRecordState: () => {},
+    },
+  });
+
+  const { registerLifecycleTools } = await import('../dist/tools/lifecycle.js?' + Date.now());
+  const server = createFakeServer();
+  registerLifecycleTools(server);
+
+  const response = await server.handlers.get('stop')({
+    name: 'zore',
+    workspace: '/repo',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /sender_name/i);
+});
+
+test('kill errors clearly when sender_name is missing for stateless HTTP callers', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      listHcomAgents: async () => [{ name: 'zore', base_name: 'zore', status: 'listening' }],
+      findLiveAgentByIdentifier: () => ({ name: 'zore', base_name: 'zore', status: 'listening' }),
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when sender identity is missing');
+      },
+    },
+  });
+
+  t.mock.module('../dist/registry.js', {
+    namedExports: {
+      getOwnedRecordsByWorkspace: () => [{ id: 'rec-1', hcomName: 'zore', state: 'managed_active' }],
+      updateRecordState: () => {},
+    },
+  });
+
+  const { registerLifecycleTools } = await import('../dist/tools/lifecycle.js?' + Date.now());
+  const server = createFakeServer();
+  registerLifecycleTools(server);
+
+  const response = await server.handlers.get('kill')({
+    name: 'zore',
+    workspace: '/repo',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /sender_name/i);
+});
+
 test('launch hints callers toward list_presets when a preset is missing', async () => {
   const server = createFakeServer();
   registerLaunchTool(server);
 
-  const response = await server.handlers.get('launch')({ preset: 'does-not-exist' });
+  const response = await server.handlers.get('launch')({ preset: 'does-not-exist', sender_name: 'nora' });
 
   assert.equal(response.isError, true);
   assert.match(response.content[0].text, /Use list_presets/i);
@@ -73,7 +455,7 @@ test('launch_topology hints callers toward list_topologies when a topology is mi
   const server = createFakeServer();
   registerTopologyLaunchTool(server);
 
-  const response = await server.handlers.get('launch_topology')({ topology: 'does-not-exist' });
+  const response = await server.handlers.get('launch_topology')({ topology: 'does-not-exist', sender_name: 'nora' });
 
   assert.equal(response.isError, true);
   assert.match(response.content[0].text, /Use list_topologies/i);
@@ -85,6 +467,7 @@ test('launch_topology expands roles by count and tracks each launched worker', a
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         launchedArgs.push(args);
         const workerNumber = launchedArgs.length;
@@ -152,6 +535,7 @@ test('launch_topology expands roles by count and tracks each launched worker', a
   const response = await server.handlers.get('launch_topology')({
     topology: 'swarm',
     workspace: '/repo',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError, response?.content?.[0]?.text);
@@ -171,6 +555,7 @@ test('launch_topology rolls back every tracked record when a later launch fails'
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         if (args[0] === 'kill') {
           killTargets.push(args[1]);
@@ -261,6 +646,7 @@ test('launch_topology rolls back every tracked record when a later launch fails'
   const response = await server.handlers.get('launch_topology')({
     topology: 'duo',
     workspace: '/repo',
+    sender_name: 'nora',
   });
 
   assert.equal(response.isError, true);
@@ -284,7 +670,19 @@ test('registerInspectTool exposes the bare inspect name', () => {
 test('registerLifecycleTools exposes bare lifecycle names', () => {
   const server = createFakeServer();
   registerLifecycleTools(server);
-  assert.deepEqual(server.names, ['stop', 'kill', 'promote']);
+  assert.deepEqual(server.names, ['stop', 'kill']);
+});
+
+test('registerAdoptTool exposes the adopt tool name', () => {
+  const server = createFakeServer();
+  registerAdoptTool(server);
+  assert.deepEqual(server.names, ['adopt']);
+});
+
+test('registerPruneTool exposes the prune tool name', () => {
+  const server = createFakeServer();
+  registerPruneTool(server);
+  assert.deepEqual(server.names, ['prune']);
 });
 
 test('matchLiveAgent matches by base_name when the live name is tag-prefixed', () => {
@@ -461,6 +859,7 @@ test('launch requires an explicit harness', async (t) => {
   const response = await server.handlers.get('launch')({
     preset: 'research-assistant',
     workspace,
+    sender_name: 'nora',
   });
 
   assert.equal(response.isError, true);
@@ -490,6 +889,7 @@ test('launch reports supported harnesses when the preset does not support the re
     preset: 'researcher',
     harness: 'claude',
     workspace,
+    sender_name: 'nora',
   });
 
   assert.equal(response.isError, true);
@@ -620,6 +1020,7 @@ test('bare launch without model or preset returns error', async () => {
 
   const response = await server.handlers.get('launch')({
     harness: 'claude',
+    sender_name: 'nora',
   });
 
   assert.equal(response.isError, true);
@@ -636,6 +1037,7 @@ test('bare launch with harness + model builds correct command', async (t) => {
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -654,6 +1056,7 @@ test('bare launch with harness + model builds correct command', async (t) => {
   const response = await server.handlers.get('launch')({
     harness: 'claude',
     model: 'sonnet',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError);
@@ -691,6 +1094,7 @@ test('preset + model override uses the override model', async (t) => {
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -735,6 +1139,7 @@ test('preset + model override uses the override model', async (t) => {
     harness: 'opencode',
     model: 'custom-model',
     workspace,
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError);
@@ -751,6 +1156,7 @@ test('bare launch tag defaults to harness name', async (t) => {
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -769,6 +1175,7 @@ test('bare launch tag defaults to harness name', async (t) => {
   const response = await server.handlers.get('launch')({
     harness: 'claude',
     model: 'sonnet',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError);
@@ -785,6 +1192,7 @@ test('custom tag overrides default', async (t) => {
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -804,6 +1212,7 @@ test('custom tag overrides default', async (t) => {
     harness: 'claude',
     model: 'haiku',
     tag: 'review',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError);
@@ -820,6 +1229,7 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions 
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args, options) => {
         capturedArgs = args;
         capturedOptions = options;
@@ -865,6 +1275,7 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions 
     preset: 'doc-writer',
     harness: 'opencode',
     workspace,
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError, response?.content?.[0]?.text);
@@ -904,6 +1315,7 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions,
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args, options) => {
         capturedArgs = args;
         capturedOptions = options;
@@ -925,6 +1337,7 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions,
     preset: 'builder',
     harness: 'opencode',
     workspace,
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError, response?.content?.[0]?.text);
@@ -945,6 +1358,7 @@ test('claude harness with reasoning xhigh includes --effort xhigh', async (t) =>
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -965,6 +1379,7 @@ test('claude harness with reasoning xhigh includes --effort xhigh', async (t) =>
     harness: 'claude',
     model: 'sonnet',
     reasoning: 'xhigh',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError, response?.content?.[0]?.text);
@@ -978,6 +1393,7 @@ test('no reasoning produces no --variant or --effort flag', async (t) => {
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -997,6 +1413,7 @@ test('no reasoning produces no --variant or --effort flag', async (t) => {
   const response = await server.handlers.get('launch')({
     harness: 'opencode',
     model: 'opencode/deepseek-v4-flash-free',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError, response?.content?.[0]?.text);
@@ -1011,6 +1428,7 @@ test('codex harness with reasoning produces no flag', async (t) => {
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -1031,6 +1449,7 @@ test('codex harness with reasoning produces no flag', async (t) => {
     harness: 'codex',
     model: 'gpt-5.5',
     reasoning: 'high',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError, response?.content?.[0]?.text);
@@ -1045,6 +1464,7 @@ test('bare launch with reasoning uses correct flag per harness', async (t) => {
 
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      resolveCallerName: async (override) => override,
       execHcom: async (args) => {
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -1065,6 +1485,7 @@ test('bare launch with reasoning uses correct flag per harness', async (t) => {
     harness: 'opencode',
     model: 'opencode/deepseek-v4-flash-free',
     reasoning: 'turbo',
+    sender_name: 'nora',
   });
 
   assert.ok(!response.isError, response?.content?.[0]?.text);
