@@ -9,7 +9,7 @@ function defaultAdoptNotice(hub: string, name: string, harness: Harness, workspa
     `hub: ${hub}  your name: ${name}  harness: ${harness}  workspace: ${workspace}`,
     `Stop/kill commands from ${hub} are now authoritative for your session.`,
     "Your system prompt and task are unchanged.",
-    `Load the "hcom" skill so you can correctly route hcom messages and acks.`,
+    `Load the "using-hcom" skill so you can correctly route hcom messages and acks.`,
     `Acknowledge this adoption by replying: "Ready, ${hub} is hub"`,
   ].join("\n");
 }
