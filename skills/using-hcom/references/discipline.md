@@ -20,6 +20,8 @@ Common mistakes, rationalization counters, and red flags for hcom coordination.
 | seeding a thread with raw `hcom send` when `thread_seed` is available | use `thread_seed` to include the exact hub mention in the seed; in HTTP/unbound callers, pass `hub_name` explicitly |
 | assuming broadcast on a thread reaches the hub when the hub was only the sender | the sender is never in `delivered_to`; the hub must be @mentioned on the seed to become a thread member |
 | omitting `--` before the message text in `hcom send` | put every flag before `--`, then the message body |
+| inline `hcom send` with backtick-containing message text instead of `--file` | double-quoted strings still expand backticks and `$` in most shells — use `--file` with a temp file for any content with backticks |
+| `hcom send` fails with `attempt to write a readonly database` and the agent abandons the report | transient SQLite WAL contention — retry once, fall back to shorter inline, then deliver via your own reply text so the hub can read it via `hcom transcript` |
 | inventing intent names like `assign` | use only `request`, `inform`, and `ack` |
 | using `ack` as generic low-noise status | use `inform` for routine updates; keep `ack` for explicit acknowledgments |
 | sending `ack` in reply to an `inform` message | do not ack informational messages; either send no reply or send a separate `inform` only when a useful status update is needed |
@@ -66,5 +68,6 @@ Common mistakes, rationalization counters, and red flags for hcom coordination.
 - raw `hcom` control-plane shell-outs such as `hcom list` when `list_all` or another MCP equivalent exists
 - using `hcom listen` while waiting for normal worker reports
 - repeated `hcom events --last` polling after workers were already told where to reply
+- inline `hcom send` with backtick-containing message text instead of `--file`
 - trying to turn `hcom-mcp` into a generic message bus instead of using raw hcom threads
 - turning a usage question into installation support, script authoring, or full team design

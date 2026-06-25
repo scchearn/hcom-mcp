@@ -5,6 +5,10 @@ description: >
   install state, or writing reusable multi-agent scripts across Claude
   Code, Gemini, Codex, or OpenCode. Use the separate `using-hcom` skill for
   practical current-session coordination patterns and house defaults.
+allowed-tools: Read Glob Grep Bash Edit Write
+metadata:
+  version: "1.1.0"
+  author: scchearn
 ---
 
 # hcom — multi-agent communication for AI coding tools

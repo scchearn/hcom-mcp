@@ -1,6 +1,10 @@
 ---
 name: using-hcom
 description: Use when the user wants to spawn an agent, coordinate, route, or supervise agents via hcom or hcom-mcp, or when a task would clearly benefit from delegating to a headless worker. Not for installation, troubleshooting, reusable hcom scripts (→ hcom-agent-messaging), or full team-topology design (→ do-agents).
+allowed-tools: Read Glob Grep Bash
+metadata:
+  version: "1.1.0"
+  author: scchearn
 ---
 
 # hcom
@@ -117,9 +121,15 @@ hcom send @review- --thread "$WF_THREAD" --intent request -- "Review this on-thr
 Shell quoting:
 
 - Short plain text can go after `--` in quotes.
-- For multiline Markdown or text containing backticks, `$variables`, brackets, nested quotes, or code blocks, prefer `--file` so the shell does not rewrite the message before `hcom` receives it.
-- `--file` reads the message from a local file. Create the file using the current shell's normal temporary-file method; avoid it for secrets unless you control permissions and cleanup.
+- Content with backticks, `$variables`, brackets, nested quotes, or code blocks MUST use `--file`. Double-quoted strings still expand backticks and `$` in most shells — your message is rewritten before hcom receives it. Don't bet on quoting; use `--file`.
+- `--file` reads the message from a local file. Use the OS temp dir: `mktemp` on Linux/macOS/Git-Bash, or `%TEMP%\msg.txt` on Windows cmd. Avoid `--file` for secrets unless you control permissions and cleanup.
 - If exact input modes matter, run `hcom send --help`.
+
+Delivery failures:
+
+- `attempt to write a readonly database` is a transient hcom internal SQLite WAL error under concurrent load — not your message, file, or permissions. Retry once; it almost always succeeds.
+- If the retry also fails, fall back to a shorter inline `hcom send @name -- "..."` — long payloads worsen WAL pressure.
+- Do not lose the report: if both attempts fail, give the full report in your own reply text so the hub can read it via `hcom transcript <your-name>`.
 
 Common mistakes:
 
@@ -128,6 +138,8 @@ Common mistakes:
 - Do not use `--thread` on launch commands.
 - Do not omit `@recipients` unless you intentionally want broadcast behavior and understand thread membership.
 - Do not rely on shell quoting for complex reviews or code snippets; use `--file`.
+- Do not put backtick-containing message text after `--` in inline sends; use `--file`.
+- Do not abandon a report when `hcom send` fails with `attempt to write a readonly database`; retry once, then fall back to shorter inline, then deliver via your own reply text.
 
 ## House Defaults
 
