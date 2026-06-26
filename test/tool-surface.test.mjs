@@ -670,6 +670,13 @@ test('registerInspectTool exposes the bare inspect name', () => {
   assert.deepEqual(server.names, ['inspect']);
 });
 
+test('registerTranscriptTool exposes the bare transcript name', async () => {
+  const { registerTranscriptTool } = await import('../dist/tools/transcript.js?' + Date.now());
+  const server = createFakeServer();
+  registerTranscriptTool(server);
+  assert.deepEqual(server.names, ['transcript']);
+});
+
 test('registerLifecycleTools exposes bare lifecycle names', () => {
   const server = createFakeServer();
   registerLifecycleTools(server);
@@ -686,6 +693,202 @@ test('registerPruneTool exposes the prune tool name', () => {
   const server = createFakeServer();
   registerPruneTool(server);
   assert.deepEqual(server.names, ['prune']);
+});
+
+test('transcript read mode builds range/full/detailed args and returns parsed JSON', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              position: 5,
+              user: 'check logs',
+              action: 'Investigating logs',
+              files: ['app.log'],
+              timestamp: '2026-06-26T10:00:00Z',
+            },
+          ]),
+          stderr: '',
+        };
+      },
+      listHcomAgents: async () => [{ name: 'muke', base_name: 'muke', status: 'listening' }],
+      findLiveAgentByIdentifier: (identifier, agents) =>
+        agents.find((agent) => agent.name === identifier || agent.base_name === identifier) ?? null,
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerTranscriptTool } = await import('../dist/tools/transcript.js?' + Date.now());
+  const server = createFakeServer();
+  registerTranscriptTool(server);
+
+  const response = await server.handlers.get('transcript')({
+    mode: 'read',
+    name: 'muke',
+    range: '5-6',
+    full: true,
+    detailed: true,
+  });
+
+  assert.equal(response.isError, undefined);
+  assert.deepEqual(capturedArgs, ['transcript', 'muke', '5-6', '--full', '--detailed', '--json']);
+  assert.deepEqual(JSON.parse(response.content[0].text), {
+    mode: 'read',
+    agent: 'muke',
+    transcript: [
+      {
+        position: 5,
+        user: 'check logs',
+        action: 'Investigating logs',
+        files: ['app.log'],
+        timestamp: '2026-06-26T10:00:00Z',
+      },
+    ],
+  });
+});
+
+test('transcript read mode errors when the agent is not live', async (t) => {
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async () => {
+        throw new Error('execHcom should not be called when the target agent is missing');
+      },
+      listHcomAgents: async () => [],
+      findLiveAgentByIdentifier: () => null,
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerTranscriptTool } = await import('../dist/tools/transcript.js?' + Date.now());
+  const server = createFakeServer();
+  registerTranscriptTool(server);
+
+  const response = await server.handlers.get('transcript')({
+    mode: 'read',
+    name: 'muke',
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /agent "muke" not found/i);
+});
+
+test('transcript search mode passes through search flags and parses results', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            count: 1,
+            results: [{ agent: 'claude', hcom_name: 'muke', matches: 2 }],
+            scope: 'live',
+          }),
+          stderr: '',
+        };
+      },
+      listHcomAgents: async () => [],
+      findLiveAgentByIdentifier: () => null,
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerTranscriptTool } = await import('../dist/tools/transcript.js?' + Date.now());
+  const server = createFakeServer();
+  registerTranscriptTool(server);
+
+  const response = await server.handlers.get('transcript')({
+    mode: 'search',
+    pattern: 'playwright',
+    live: true,
+    limit: 3,
+    agent_type: 'claude',
+    exclude_self: true,
+  });
+
+  assert.equal(response.isError, undefined);
+  assert.deepEqual(capturedArgs, [
+    'transcript',
+    'search',
+    'playwright',
+    '--live',
+    '--limit',
+    '3',
+    '--agent',
+    'claude',
+    '--exclude-self',
+    '--json',
+  ]);
+  assert.deepEqual(JSON.parse(response.content[0].text), {
+    mode: 'search',
+    result: {
+      count: 1,
+      results: [{ agent: 'claude', hcom_name: 'muke', matches: 2 }],
+      scope: 'live',
+    },
+  });
+});
+
+test('transcript timeline mode passes through limit and full flags', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              instance: 'muke',
+              position: 11,
+              user: 'what changed',
+              action: 'Explaining the change',
+              timestamp: '2026-06-26T10:32:05Z',
+              files: ['README.md'],
+            },
+          ]),
+          stderr: '',
+        };
+      },
+      listHcomAgents: async () => [],
+      findLiveAgentByIdentifier: () => null,
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerTranscriptTool } = await import('../dist/tools/transcript.js?' + Date.now());
+  const server = createFakeServer();
+  registerTranscriptTool(server);
+
+  const response = await server.handlers.get('transcript')({
+    mode: 'timeline',
+    last: 3,
+    full: true,
+  });
+
+  assert.equal(response.isError, undefined);
+  assert.deepEqual(capturedArgs, ['transcript', 'timeline', '--last', '3', '--full', '--json']);
+  assert.deepEqual(JSON.parse(response.content[0].text), {
+    mode: 'timeline',
+    transcript: [
+      {
+        instance: 'muke',
+        position: 11,
+        user: 'what changed',
+        action: 'Explaining the change',
+        timestamp: '2026-06-26T10:32:05Z',
+        files: ['README.md'],
+      },
+    ],
+  });
 });
 
 test('matchLiveAgent matches by base_name when the live name is tag-prefixed', () => {

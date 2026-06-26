@@ -54,9 +54,9 @@ digraph mcp_vs_raw {
 
   "Need to do something" [shape=diamond];
   "Is hcom-mcp connected?" [shape=diamond];
-  "Control-plane task?\n(discovery, launch, inspect,\nstop/kill, thread_seed)" [shape=diamond];
+  "Control-plane task?\n(discovery, launch, inspect,\ntranscript, stop/kill, thread_seed)" [shape=diamond];
   "Use MCP tool" [shape=box];
-  "Communication task?\n(send, events, transcript)" [shape=diamond];
+  "Communication task?\n(send, events)" [shape=diamond];
   "Use raw hcom" [shape=box];
   "MCP has the operation?" [shape=diamond];
   "Fall back to raw hcom" [shape=box];
@@ -77,15 +77,17 @@ digraph mcp_vs_raw {
 | discover saved launch options | `list_presets`, `list_topologies` |
 | understand current state | `status`, `config_paths`, `list_all`, `list_managed` |
 | inspect one managed agent | `inspect` |
+| read/search transcript history | `transcript` |
 | seed a workflow thread with exact hub mention auto-included | `thread_seed` |
 | inspect thread messages | `thread_inspect` |
 | launch or clean up managed workers | `launch`, `launch_topology`, `inspect`, `stop`, `kill`, `promote` |
-| assign work, route peer handoffs, subsequent thread sends, watch message flow | raw `hcom send`, `hcom events`, `hcom transcript` |
+| assign work, route peer handoffs, subsequent thread sends, watch message flow | raw `hcom send`, `hcom events` |
 
 Rules:
 
 - if `hcom-mcp` is connected, you MUST use MCP for discovery and launch before using raw `hcom` spawn commands or `hcom --help` for launch discovery
 - if `hcom-mcp` exposes the operation, do not use bash plus raw `hcom` for the same control-plane task; use the MCP tool instead
+- if `hcom-mcp` is connected, use `transcript` for transcript reads, search, and timeline; reserve raw `hcom transcript` for fallback or explicit shell-only requests
 - if `hcom-mcp` is connected, use `thread_seed` instead of raw `hcom send` for thread creation — it auto-includes the exact `@<hub-name>` mention in the seed, and HTTP/unbound callers should pass `hub_name` explicitly
 - do not read `~/.hcom/mcp/config.json`, `.hcom-mcp.json`, or hunt the repo just to discover presets or topologies when `hcom-mcp` is connected
 - do not treat `hcom-mcp` as the message bus; it bootstraps and supervises, but workflow communication still lives on shared hcom threads
