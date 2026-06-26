@@ -17,14 +17,13 @@ function defaultAdoptNotice(hub: string, name: string, harness: Harness, workspa
 export function registerAdoptTool(server: any) {
   server.tool(
     "adopt",
-    "Adopt an existing hcom agent into managed lifecycle. Creates an adopted registry record for an agent that was not spawned by hcom-mcp, enabling stop/kill management. Requires the agent to be live in hcom. By default the adoptee is notified via an hcom inform message; pass silent=true to suppress.",
+    "Adopt an existing hcom agent into managed lifecycle. Creates an adopted registry record for an agent that was not spawned by hcom-mcp, enabling stop/kill management. Requires the agent to be live in hcom. Sends an hcom inform message to the adoptee with adoption instructions (hub name, harness, workspace, and the 'using-hcom' skill loading instruction).",
     {
       name: z.string().describe("hcom agent name to adopt"),
       workspace: z.string().optional().describe("Workspace path for registry"),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
-      silent: z.boolean().optional().describe("Suppress the adoption notice to the adoptee (default: false)."),
     },
-    async ({ name, workspace, sender_name, silent }: { name: string; workspace?: string; sender_name?: string; silent?: boolean }) => {
+    async ({ name, workspace, sender_name }: { name: string; workspace?: string; sender_name?: string }) => {
       const cwd = workspace ?? process.cwd();
 
       try {
@@ -90,12 +89,9 @@ export function registerAdoptTool(server: any) {
         });
 
         // ponytail: one-shot inform, not a thread; upgrade to thread if durability needed
-        let notify: { delivered: boolean; error?: string } | undefined;
-        if (!silent) {
-          const text = defaultAdoptNotice(caller, name, harness, cwd);
-          const r = await execHcom(["send", `@${name}`, "--name", caller, "--intent", "inform", "--", text]);
-          notify = { delivered: r.exitCode === 0, ...(r.exitCode !== 0 && { error: r.stderr || r.stdout }) };
-        }
+        const text = defaultAdoptNotice(caller, name, harness, cwd);
+        const r = await execHcom(["send", `@${name}`, "--name", caller, "--intent", "inform", "--", text]);
+        const notify = { delivered: r.exitCode === 0, ...(r.exitCode !== 0 && { error: r.stderr || r.stdout }) };
 
         return {
           content: [{
