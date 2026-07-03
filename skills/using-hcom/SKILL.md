@@ -3,7 +3,7 @@ name: using-hcom
 description: Use when the user wants to spawn an agent, coordinate, route, or supervise agents via hcom or hcom-mcp, or when a task would clearly benefit from delegating to a headless worker. Not for installation, troubleshooting, reusable hcom scripts (→ hcom-agent-messaging), or full team-topology design (→ do-agents).
 allowed-tools: Read Glob Grep Bash
 metadata:
-  version: "1.2.0"
+  version: "1.2.1"
   author: scchearn
 ---
 
@@ -77,6 +77,7 @@ digraph mcp_vs_raw {
 | discover saved launch options | `list_presets`, `list_topologies` |
 | understand current state | `status`, `config_paths`, `list_all`, `list_managed` |
 | inspect one managed agent | `inspect` |
+| read a live agent's runtime model | `inspect` with `aspect: "term"` |
 | read/search transcript history | `transcript` |
 | seed a workflow thread with exact hub mention auto-included | `thread_seed` |
 | inspect thread messages | `thread_inspect` |
@@ -214,6 +215,26 @@ Rationalizations to reject:
 | "What if they missed it?" | Ask them to confirm. Do not re-send the content. |
 
 For common mistakes, rationalization counters, and red flags, see `references/discipline.md`.
+
+## Runtime Model of a Live Agent
+
+The runtime model of a live agent is not a structured field on `inspect`, `list_all`, or `list_managed` — those return `tool` (the harness) only.
+
+To read the model, inspect the agent's TUI screen:
+
+- MCP connected (preferred): `inspect <name>` with `aspect: "term"` — returns `lines[]` containing the rendered TUI.
+- Shell fallback: `hcom term <name>` — same `lines[]`, or `--json` for structured output.
+
+The model appears in the TUI footer/bottom area; the exact line shape varies per harness. Across every confirmed harness, the footer carries the model — this is the most stable anchor when parsing an unfamiliar harness's screen.
+
+Confirmed patterns (read the lines, don't assume a fixed field name):
+
+- opencode: status bar near bottom — `Orchestrator · <model> <provider> · <effort>`
+- claude: footer right — `[<model>]`
+- codex: startup box `model: <model> <effort>` and prompt footer `<model> <effort> · <dir>`
+- antigravity: ASCII banner at start and bottom footer — `<model> (<effort>)`
+
+Only works on live agents with a PTY. Agents that have exited or never bound a terminal return empty lines.
 
 ## Cross-Tool Launch Patterns
 
