@@ -1120,6 +1120,7 @@ test('registerModelResources exposes all fixed model resource URIs', () => {
       'hcom://models/claude',
       'hcom://models/opencode',
       'hcom://models/codex',
+      'hcom://models/antigravity',
     ],
   );
 });
@@ -1170,7 +1171,7 @@ test('listHarnessModels returns bundled catalog for codex', async () => {
 test('listHarnessModels returns all harnesses when no harness specified', async () => {
   const results = await listHarnessModels();
 
-  assert.equal(results.length, 3);
+  assert.equal(results.length, 4);
   const statuses = results.map((r) => r.status);
   assert.ok(statuses.includes('live'));
   assert.equal(statuses.includes('bundled'), true);

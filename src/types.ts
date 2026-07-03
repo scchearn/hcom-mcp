@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // --- Harness types ---
 
-export const HarnessEnum = z.enum(["claude", "opencode", "codex"]);
+export const HarnessEnum = z.enum(["claude", "opencode", "codex", "antigravity"]);
 export type Harness = z.infer<typeof HarnessEnum>;
 
 // Maps harness name to hcom CLI subcommand
@@ -10,6 +10,7 @@ export const HARNESS_COMMAND: Record<Harness, string> = {
   claude: "claude",
   opencode: "opencode",
   codex: "codex",
+  antigravity: "agy",
 };
 
 // Maps harness name to the environment variable for default model args
@@ -17,6 +18,8 @@ export const HARNESS_ENV_ARGS: Record<Harness, string> = {
   claude: "HCOM_CLAUDE_ARGS",
   opencode: "HCOM_OPENCODE_ARGS",
   codex: "HCOM_CODEX_ARGS",
+  // ponytail: antigravity has no HCOM_*_ARGS env today; placeholder keeps the Record total
+  antigravity: "HCOM_ANTIGRAVITY_ARGS",
 };
 
 // --- Launch modes ---
@@ -51,6 +54,7 @@ export const AgentPresetHarnessMapSchema = z
     claude: HarnessVariantSchema.optional(),
     opencode: HarnessVariantSchema.optional(),
     codex: HarnessVariantSchema.optional(),
+    antigravity: HarnessVariantSchema.optional(),
   })
   .refine((value) => Object.values(value).some(Boolean), {
     message: "At least one harness variant is required",

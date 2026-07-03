@@ -111,7 +111,7 @@ export function registerLaunchTool(server: any) {
     "launch",
     "Launch a headless hcom agent. Use a preset name for configured defaults, or provide harness+model directly for a bare launch. Preset defaults (model, tag, prompt) can be overridden with explicit parameters.",
     {
-      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex)"),
+      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity)"),
       preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
       model: z.string().optional().describe("Model name override or standalone model for bare launches"),
       prompt: z.string().optional().describe("Initial prompt for the agent"),

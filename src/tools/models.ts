@@ -7,6 +7,7 @@ const MODEL_RESOURCE_URIS = {
   claude: "hcom://models/claude",
   opencode: "hcom://models/opencode",
   codex: "hcom://models/codex",
+  antigravity: "hcom://models/antigravity",
 } as const;
 
 function jsonResource(uri: string, payload: unknown) {
@@ -26,7 +27,7 @@ export function registerListModelsTool(server: any) {
     "list_models",
     "List available models for harness(es). Supports live discovery where the harness CLI exposes a catalog and bundled catalogs where the harness model set is intentionally curated.",
     {
-      harness: HarnessEnum.optional().describe("Specific harness to query (claude, opencode, codex). Omit to query all harnesses."),
+      harness: HarnessEnum.optional().describe("Specific harness to query (claude, opencode, codex, antigravity). Omit to query all harnesses."),
     },
     async ({ harness }: { harness?: z.infer<typeof HarnessEnum> }) => {
       try {

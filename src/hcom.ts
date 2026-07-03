@@ -207,7 +207,16 @@ export async function discoverHarnessModels(
     return bundledCatalog(harness, BUNDLED_CLAUDE_MODELS, BUNDLED_CLAUDE_NOTES);
   }
 
-  return bundledCatalog(harness, BUNDLED_CODEX_MODELS);
+  if (harness === "codex") {
+    return bundledCatalog(harness, BUNDLED_CODEX_MODELS);
+  }
+
+  // ponytail: antigravity exposes no --model selection (default Gemini 3.5 Flash Medium);
+  // return an empty bundled catalog so list_models stays honest and validatePresetModelAvailability
+  // fails any preset that tries to set a model for antigravity.
+  return bundledCatalog(harness, [], [
+    "Antigravity does not expose --model selection; the harness picks the model.",
+  ]);
 }
 
 /**
