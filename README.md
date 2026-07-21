@@ -92,6 +92,7 @@ Operating guidance ships in `skills/`:
 | `list_topologies` | List configured topology presets |
 | `inspect` | Inspect an agent's status, transcript, events, or terminal |
 | `transcript` | Read agent transcripts, transcript search results, or transcript timeline |
+| `continue_from` | Get handoff context from a live or stopped agent |
 | `prune` | Remove stale registry records |
 | `thread_seed` | Create a workflow thread |
 | `thread_inspect` | Query thread events |
