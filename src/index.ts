@@ -14,6 +14,7 @@ import {
 import { registerListModelsTool, registerModelResources } from "./tools/models.js";
 import { registerInspectTool } from "./tools/inspect.js";
 import { registerTranscriptTool } from "./tools/transcript.js";
+import { registerContinueFromTool } from "./tools/continue_from.js";
 import { registerPruneTool } from "./tools/prune.js";
 import { registerLifecycleTools } from "./tools/lifecycle.js";
 import { registerThreadSeedTool, registerThreadInspectTool } from "./tools/threads.js";
@@ -36,6 +37,7 @@ function createHcomMcpServer(): McpServer {
   registerStatusTool(s);
   registerInspectTool(s);
   registerTranscriptTool(s);
+  registerContinueFromTool(s);
   registerPruneTool(s);
   registerLifecycleTools(s);
   registerThreadSeedTool(s);

@@ -17,6 +17,7 @@ import { registerInspectTool } from '../dist/tools/inspect.js';
 import { registerLifecycleTools } from '../dist/tools/lifecycle.js';
 import { registerAdoptTool } from '../dist/tools/adopt.js';
 import { registerPruneTool } from '../dist/tools/prune.js';
+import { registerContinueFromTool } from '../dist/tools/continue_from.js';
 import * as configModule from '../dist/config.js';
 
 const { registerListManagedTool, matchLiveAgent, reconcileManagedRecords } = listModule;
@@ -675,6 +676,236 @@ test('registerTranscriptTool exposes the bare transcript name', async () => {
   const server = createFakeServer();
   registerTranscriptTool(server);
   assert.deepEqual(server.names, ['transcript']);
+});
+
+test('registerContinueFromTool exposes the continue_from name', () => {
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+  assert.deepEqual(server.names, ['continue_from']);
+});
+
+test('continue_from uses default depths and returns the parsed bundle', async (t) => {
+  let capturedArgs;
+  const bundle = {
+    agent: 'mosa',
+    transcript: { text: 'handoff', range: '1-2' },
+    events: { file_operations: [], lifecycle: [], messages_from: [], messages_to: [] },
+    files: ['src/index.ts'],
+    template_command: 'hcom bundle create ...',
+    note: 'Last 40 transcript entries, 10 events per category',
+  };
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: JSON.stringify(bundle), stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerContinueFromTool } = await import('../dist/tools/continue_from.js?' + Date.now());
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+
+  const response = await server.handlers.get('continue_from')({ name: 'mosa' });
+
+  assert.equal(response.isError, undefined);
+  assert.deepEqual(capturedArgs, [
+    'bundle',
+    'prepare',
+    '--for',
+    'mosa',
+    '--last-transcript',
+    '40',
+    '--last-events',
+    '10',
+    '--json',
+  ]);
+  assert.deepEqual(JSON.parse(response.content[0].text), bundle);
+});
+
+test('continue_from strips an @ prefix before calling hcom', async (t) => {
+  let capturedArgs;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: JSON.stringify({ agent: 'mosa' }), stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerContinueFromTool } = await import('../dist/tools/continue_from.js?' + Date.now());
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+
+  const response = await server.handlers.get('continue_from')({ name: '@mosa' });
+
+  assert.equal(response.isError, undefined);
+  assert.equal(capturedArgs[3], 'mosa');
+});
+
+test('continue_from passes through custom transcript and event depths', async (t) => {
+  let capturedArgs;
+  const bundle = {
+    agent: 'mosa',
+    transcript: { text: null, range: null },
+    events: { file_operations: [], lifecycle: [], messages_from: [], messages_to: [] },
+    files: [],
+    template_command: 'hcom bundle create ...',
+    note: 'Last 100 transcript entries, 50 events per category',
+  };
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: JSON.stringify(bundle), stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerContinueFromTool } = await import('../dist/tools/continue_from.js?' + Date.now());
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+
+  const response = await server.handlers.get('continue_from')({
+    name: 'mosa',
+    last_transcript: 100,
+    last_events: 50,
+  });
+
+  assert.equal(response.isError, undefined);
+  assert.deepEqual(capturedArgs, [
+    'bundle',
+    'prepare',
+    '--for',
+    'mosa',
+    '--last-transcript',
+    '100',
+    '--last-events',
+    '50',
+    '--json',
+  ]);
+  assert.equal(JSON.parse(response.content[0].text).note, bundle.note);
+});
+
+test('continue_from returns an unknown agent bundle without synthesizing an error', async (t) => {
+  const bundle = {
+    agent: 'nonexistent',
+    transcript: { text: null, range: null },
+    events: {
+      file_operations: [],
+      lifecycle: [],
+      messages_from: [{ from: 'nonexistent', message: 'historical match' }],
+      messages_to: [],
+    },
+    files: [],
+    template_command: 'hcom bundle create ...',
+    note: 'Last 40 transcript entries, 10 events per category',
+  };
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async () => ({ exitCode: 0, stdout: JSON.stringify(bundle), stderr: '' }),
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerContinueFromTool } = await import('../dist/tools/continue_from.js?' + Date.now());
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+
+  const response = await server.handlers.get('continue_from')({ name: 'nonexistent' });
+  const payload = JSON.parse(response.content[0].text);
+
+  assert.equal(response.isError, undefined);
+  assert.equal(payload.transcript.text, null);
+  assert.deepEqual(payload.events.messages_from, bundle.events.messages_from);
+});
+
+test('continue_from rejects empty and @-only names without calling hcom', async (t) => {
+  let called = false;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async () => {
+        called = true;
+        throw new Error('execHcom should not be called for an empty name');
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerContinueFromTool } = await import('../dist/tools/continue_from.js?' + Date.now());
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+  const handler = server.handlers.get('continue_from');
+
+  for (const name of ['', '@']) {
+    const response = await handler({ name });
+    assert.equal(response.isError, true);
+    assert.equal(response.content[0].text, 'Error: name is required');
+  }
+
+  assert.equal(called, false);
+});
+
+test('continue_from surfaces stderr or stdout for a nonzero hcom exit', async (t) => {
+  let call = 0;
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async () => {
+        call += 1;
+        return call === 1
+          ? { exitCode: 1, stdout: 'fallback output', stderr: 'hcom DB locked' }
+          : { exitCode: 1, stdout: 'fallback output', stderr: '' };
+      },
+      parseHcomJson: JSON.parse,
+    },
+  });
+
+  const { registerContinueFromTool } = await import('../dist/tools/continue_from.js?' + Date.now());
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+  const handler = server.handlers.get('continue_from');
+
+  const stderrResponse = await handler({ name: 'mosa' });
+  assert.equal(stderrResponse.isError, true);
+  assert.equal(stderrResponse.content[0].text, 'Error preparing bundle: hcom DB locked');
+
+  const stdoutResponse = await handler({ name: 'mosa' });
+  assert.equal(stdoutResponse.isError, true);
+  assert.equal(stdoutResponse.content[0].text, 'Error preparing bundle: fallback output');
+});
+
+test('continue_from rejects exit-zero non-JSON output', async (t) => {
+  const stdout = 'x'.repeat(250);
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async () => ({ exitCode: 0, stdout, stderr: '' }),
+      parseHcomJson: () => null,
+    },
+  });
+
+  const { registerContinueFromTool } = await import('../dist/tools/continue_from.js?' + Date.now());
+  const server = createFakeServer();
+  registerContinueFromTool(server);
+
+  const response = await server.handlers.get('continue_from')({ name: 'mosa' });
+
+  assert.equal(response.isError, true);
+  assert.equal(
+    response.content[0].text,
+    `Error preparing bundle: hcom returned non-JSON output: ${stdout.slice(0, 200)}`,
+  );
 });
 
 test('registerLifecycleTools exposes bare lifecycle names', () => {
