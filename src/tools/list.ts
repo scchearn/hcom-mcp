@@ -44,6 +44,13 @@ export function reconcileManagedRecords(
       return { ...record, state: newState as OwnershipState };
     }
 
+    // Blocked records: the agent was alive but waiting on user attention or
+    // still launching. If it is live again, promote to active; if it is gone,
+    // demote to lost.
+    if (record.state === "managed_blocked") {
+      return { ...record, state: (liveAgent ? "managed_active" : "managed_lost") as OwnershipState };
+    }
+
     // For managed_lost, skip further transitions (preserve existing behavior)
     if (record.state === "managed_lost") {
       return record;

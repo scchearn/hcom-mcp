@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -16,24 +16,111 @@ interface Registry {
   records: RegistryRecord[];
 }
 
+/**
+ * Typed error for registry load failures. Carries the quarantine path when the
+ * corrupt data was preserved for inspection instead of being lost.
+ */
+export class RegistryError extends Error {
+  readonly quarantinePath?: string;
+
+  constructor(message: string, quarantinePath?: string) {
+    super(message);
+    this.name = "RegistryError";
+    this.quarantinePath = quarantinePath;
+  }
+}
+
+/**
+ * Preserve corrupt registry data at registry.corrupt-<ts>.json so a parse
+ * failure never silently destroys the only copy of the records.
+ */
+function quarantine(content: string, reason: string): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const quarantinePath = join(REGISTRY_DIR, `registry.corrupt-${ts}.json`);
+  try {
+    writeFileSync(quarantinePath, content, "utf-8");
+  } catch (err: any) {
+    throw new RegistryError(
+      `Registry at ${REGISTRY_PATH} is corrupt (${reason}) and could not be quarantined to ${quarantinePath}: ${err.message}`,
+    );
+  }
+  return quarantinePath;
+}
+
 function loadRegistry(): Registry {
   if (!existsSync(REGISTRY_PATH)) {
     return { records: [] };
   }
+
+  let raw: string;
   try {
-    const raw = readFileSync(REGISTRY_PATH, "utf-8");
-    const parsed = JSON.parse(raw);
-    return { records: (parsed.records ?? []).map((r: any) => RegistryRecordSchema.parse(r)) };
-  } catch {
-    return { records: [] };
+    raw = readFileSync(REGISTRY_PATH, "utf-8");
+  } catch (err: any) {
+    throw new RegistryError(`Failed to read registry at ${REGISTRY_PATH}: ${err.message}`);
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    const quarantinePath = quarantine(raw, err.message);
+    throw new RegistryError(
+      `Registry at ${REGISTRY_PATH} is not valid JSON (${err.message}). ` +
+        `The file was quarantined to ${quarantinePath} and no records were loaded.`,
+      quarantinePath,
+    );
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !Array.isArray((parsed as { records?: unknown }).records)
+  ) {
+    const quarantinePath = quarantine(raw, "expected { records: [...] }");
+    throw new RegistryError(
+      `Registry at ${REGISTRY_PATH} has an unexpected shape (expected { records: [...] }). ` +
+        `The file was quarantined to ${quarantinePath} and no records were loaded.`,
+      quarantinePath,
+    );
+  }
+
+  // Per-record recovery: keep valid records and quarantine invalid ones instead
+  // of losing the whole registry over one bad record.
+  const records: RegistryRecord[] = [];
+  const bad: unknown[] = [];
+  for (const r of (parsed as { records: unknown[] }).records) {
+    const parsedRecord = RegistryRecordSchema.safeParse(r);
+    if (parsedRecord.success) {
+      records.push(parsedRecord.data);
+    } else {
+      bad.push(r);
+    }
+  }
+
+  if (bad.length > 0) {
+    const quarantinePath = quarantine(JSON.stringify(bad, null, 2), `${bad.length} invalid record(s)`);
+    // Heal the live file so the bad records are not re-quarantined on every load.
+    saveRegistry({ records });
+    throw new RegistryError(
+      `Registry at ${REGISTRY_PATH} contained ${bad.length} invalid record(s). ` +
+        `Valid records were kept; invalid ones were quarantined to ${quarantinePath}.`,
+      quarantinePath,
+    );
+  }
+
+  return { records };
 }
 
 function saveRegistry(registry: Registry): void {
   if (!existsSync(REGISTRY_DIR)) {
     mkdirSync(REGISTRY_DIR, { recursive: true });
   }
-  writeFileSync(REGISTRY_PATH, JSON.stringify(registry, null, 2), "utf-8");
+  // Atomic write: a crash mid-write can truncate the live file, so write to a
+  // temp path and rename over the target. Lost-update races between concurrent
+  // writers are accepted (reconcile rebuilds from `hcom list`); no locking.
+  const tmpPath = `${REGISTRY_PATH}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(registry, null, 2), "utf-8");
+  renameSync(tmpPath, REGISTRY_PATH);
 }
 
 /**
