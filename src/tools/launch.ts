@@ -6,6 +6,17 @@ import { loadMergedConfig, resolveAgentPreset, resolveTopologyPreset, validateTo
 import { addRecord, removeRecords, updateRecordState, updateRecordVerify } from "../registry.js";
 import { HARNESS_COMMAND, HarnessEnum } from "../types.js";
 import type { AgentPreset, Harness, OwnershipState } from "../types.js";
+import {
+  E_AGENT_NOT_FOUND,
+  E_HARNESS_REQUIRED,
+  E_INVALID_TOPOLOGY_REF,
+  E_LAUNCH_FAILED,
+  E_NO_SENDER,
+  E_PRESET_NOT_FOUND,
+  E_TOPOLOGY_NOT_FOUND,
+  internalError,
+  toolError,
+} from "../errors.js";
 
 type ModelCatalogCache = Map<Harness, ModelDiscoveryResult>;
 
@@ -120,6 +131,12 @@ export async function validatePresetModelAvailability(
   preset: Pick<ResolvedLaunchPreset, "name" | "harness" | "model">,
   catalogCache: ModelCatalogCache = new Map()
 ): Promise<string | null> {
+  // #14: antigravity exposes no --model selection and its catalog is empty;
+  // validating would make every antigravity preset unlaunchable. Skip.
+  if (preset.harness === "antigravity") {
+    return null;
+  }
+
   let catalog = catalogCache.get(preset.harness);
   if (!catalog) {
     [catalog] = await listHarnessModels(preset.harness);
@@ -151,26 +168,28 @@ export async function validatePresetModelAvailability(
 export function registerLaunchTool(server: any) {
   server.tool(
     "launch",
-    "Launch a headless hcom agent. Use a preset name for configured defaults, or provide harness+model directly for a bare launch. Preset defaults (model, tag, prompt) can be overridden with explicit parameters.",
+    "Launch one or more headless hcom agents. Use a preset name for configured defaults, or provide harness+model directly for a bare launch. Preset defaults (model, tag, prompt) can be overridden with explicit parameters. Returns { presetName, hcomNames, batchId, registryId, registryIds, command } plus blocked/reason when hcom exits 2 (agent alive but blocked or still launching) and modelNote/reasoningNote when applicable. Preconditions: sender identity (see sender_name). Related: spawn_and_verify (readiness gate), launch_topology (multi-role batches), list_presets (catalog).",
     {
       harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity, gemini, kilo, pi, omp, cursor, kimi, copilot)"),
       preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
-      model: z.string().optional().describe("Model name override or standalone model for bare launches"),
+      model: z.string().optional().describe("Model name override or standalone model for bare launches. Ignored for antigravity, which does not expose model selection."),
       prompt: z.string().optional().describe("Initial prompt for the agent"),
       tag: z.string().optional().describe("Tag for the agent (defaults to harness name for bare launches)"),
       dir: z.string().optional().describe("Working directory override"),
+      count: z.number().int().min(1).max(50).optional().describe("Number of agents to launch in one batch (default: 1). All share the same preset/overrides; each gets its own registry record."),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
-      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
-      reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
+      reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored — a reasoningNote is returned on the result)"),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ttl_minutes }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, count, workspace, sender_name, reasoning, ttl_minutes }: {
       harness: Harness;
       preset?: string;
       model?: string;
       prompt?: string;
       tag?: string;
       dir?: string;
+      count?: number;
       workspace?: string;
       sender_name?: string;
       reasoning?: string;
@@ -182,24 +201,18 @@ export function registerLaunchTool(server: any) {
         const callerName = await resolveCallerName(sender_name);
 
         if (!callerName) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_NO_SENDER,
+            "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+          );
         }
 
         // Require at least preset or model
         if (!presetName && !model) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Error: Provide at least a preset or a model. Use list_presets to see available presets, or specify harness + model for a bare launch.",
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_PRESET_NOT_FOUND,
+            "Provide at least a preset or a model. Use list_presets to see available presets, or specify harness + model for a bare launch.",
+          );
         }
 
         if (presetName) {
@@ -208,23 +221,17 @@ export function registerLaunchTool(server: any) {
           const preset = resolveAgentPreset(config, presetName);
 
           if (!preset) {
-            return {
-              content: [{
-                type: "text" as const,
-                text: `Error: Agent preset "${presetName}" not found. Available presets: ${Object.keys(config.agentPresets).join(", ")}. Use list_presets to inspect the merged preset catalog.`,
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_PRESET_NOT_FOUND,
+              `Agent preset "${presetName}" not found. Available presets: ${Object.keys(config.agentPresets).join(", ")}. Use list_presets to inspect the merged preset catalog.`,
+            );
           }
 
           if (!harness) {
-            return {
-              content: [{
-                type: "text" as const,
-                text: `Error: Launch preset "${preset.name}" requires an explicit harness. Supported: ${getSupportedHarnesses(preset).join(", ")}.`,
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_HARNESS_REQUIRED,
+              `Launch preset "${preset.name}" requires an explicit harness. Supported: ${getSupportedHarnesses(preset).join(", ")}.`,
+            );
           }
 
           const resolvedPreset = resolvePresetHarness(preset, harness);
@@ -246,7 +253,7 @@ export function registerLaunchTool(server: any) {
           // Resolve effective prompt upstream
           resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
 
-          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName);
+          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, count ?? 1);
           return {
             content: [{
               type: "text" as const,
@@ -269,7 +276,7 @@ export function registerLaunchTool(server: any) {
             ttlMinutes: ttl_minutes,
           };
 
-          const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName);
+          const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName, count ?? 1);
           return {
             content: [{
               type: "text" as const,
@@ -278,10 +285,7 @@ export function registerLaunchTool(server: any) {
           };
         }
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );
@@ -293,11 +297,11 @@ export function registerLaunchTool(server: any) {
 export function registerTopologyLaunchTool(server: any) {
   server.tool(
     "launch_topology",
-    "Launch multiple agents from a topology preset. Rolls back all if any fail. With verify=true, gates each launched agent on readiness (same gate as spawn_and_verify) and reports per-agent outcomes.",
+    "Launch multiple agents from a topology preset. Rolls back all if any fail. With verify=true, gates each launched agent on readiness (same gate as spawn_and_verify) and reports per-agent outcomes. Returns { topology, launched, totalAgents, verifyOutcomes? }. Preconditions: sender identity (see sender_name). Related: list_topologies (catalog), launch (single agent).",
     {
       topology: z.string().describe("Name of the topology preset from config"),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
-      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
       verify: z.boolean().optional().describe("Gate each launched agent on readiness and report outcomes (default: false)"),
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness when verify=true (default: 60)"),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes, applied to every role in the batch: records expire after this and prune expired=true kills + clears them. Overrides per-preset ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
@@ -315,37 +319,28 @@ export function registerTopologyLaunchTool(server: any) {
       try {
         const callerName = await resolveCallerName(sender_name);
         if (!callerName) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_NO_SENDER,
+            "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+          );
         }
         const config = loadMergedConfig(cwd);
         const topology = resolveTopologyPreset(config, topologyName);
 
         if (!topology) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Error: Topology preset "${topologyName}" not found. Available: ${Object.keys(config.topologyPresets).join(", ")}. Use list_topologies to inspect the merged topology catalog.`,
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_TOPOLOGY_NOT_FOUND,
+            `Topology preset "${topologyName}" not found. Available: ${Object.keys(config.topologyPresets).join(", ")}. Use list_topologies to inspect the merged topology catalog.`,
+          );
         }
 
         // Validate that all referenced presets exist
         const refErrors = validateTopologyReferences(config, topologyName);
         if (refErrors.length > 0) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Error: Invalid topology references:\n${refErrors.join("\n")}`,
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_INVALID_TOPOLOGY_REF,
+            `Invalid topology references:\n${refErrors.join("\n")}`,
+          );
         }
 
         const modelCatalogCache: ModelCatalogCache = new Map();
@@ -370,13 +365,10 @@ export function registerTopologyLaunchTool(server: any) {
         for (const { role, resolved } of resolvedRoles) {
           const validationError = await validatePresetModelAvailability(resolved, modelCatalogCache);
           if (validationError) {
-            return {
-              content: [{
-                type: "text" as const,
-                text: `Error: Failed to validate role "${role.role}" with preset "${role.preset}": ${validationError}`,
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_PRESET_NOT_FOUND,
+              `Failed to validate role "${role.role}" with preset "${role.preset}": ${validationError}`,
+            );
           }
         }
 
@@ -412,13 +404,10 @@ export function registerTopologyLaunchTool(server: any) {
                 await execHcom(["kill", name, "--go"]);
               }
             }
-            return {
-              content: [{
-                type: "text" as const,
-                text: `Error: Failed to launch role "${role.role}" with preset "${role.preset}": ${err.message}. Rolled back ${launched.length} agents.`,
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_LAUNCH_FAILED,
+              `Failed to launch role "${role.role}" with preset "${role.preset}": ${err.message}. Rolled back ${launched.length} agents.`,
+            );
           }
         }
 
@@ -434,10 +423,7 @@ export function registerTopologyLaunchTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );
@@ -445,13 +431,16 @@ export function registerTopologyLaunchTool(server: any) {
 
 /**
  * Build and execute an hcom launch command for a single agent preset.
+ * count > 1 spawns that many agents in one hcom call (`hcom [N] <harness>`);
+ * every spawned name gets its own registry record.
  */
 export async function launchAgent(
   preset: ResolvedLaunchPreset,
   overrides: { prompt?: string; dir?: string },
   workspace: string,
   catalogCache: ModelCatalogCache = new Map(),
-  launchedBy?: string
+  launchedBy?: string,
+  count: number = 1
 ): Promise<LaunchResult> {
   const validationError = await validatePresetModelAvailability(preset, catalogCache);
   if (validationError) {
@@ -461,15 +450,24 @@ export async function launchAgent(
   // launch result so the caller knows the model was not catalog-verified.
   const modelNote =
     preset.harness === "claude" ? claudeModelNote(preset.model) : undefined;
+  // #14: codex ignores reasoning; surface a note instead of silently dropping.
+  const reasoningNote =
+    preset.reasoning && preset.harness === "codex"
+      ? `Reasoning "${preset.reasoning}" is ignored by the codex harness; the codex CLI has no reasoning-effort flag.`
+      : undefined;
 
   const args: string[] = [];
 
-  // hcom <harness> [tool-args...]
+  // hcom [N] <harness> [tool-args...]
+  if (count > 1) {
+    args.push(String(count));
+  }
   const command = HARNESS_COMMAND[preset.harness];
   args.push(command);
 
-  // Model selection
-  if (preset.model) {
+  // Model selection. antigravity has no --model flag; the harness picks the
+  // model (see validatePresetModelAvailability).
+  if (preset.model && preset.harness !== "antigravity") {
     args.push("--model", preset.model);
   }
 
@@ -599,6 +597,7 @@ export async function launchAgent(
       registryIds: records.map((record) => record.id),
       command: `hcom ${args.join(" ")}`,
       ...(modelNote ? { modelNote } : {}),
+      ...(reasoningNote ? { reasoningNote } : {}),
     };
   }
 
@@ -616,6 +615,7 @@ export async function launchAgent(
       reason: `hcom launch exited ${result.exitCode}: agent(s) still launching or blocked on user attention. ` +
         `Recorded as managed_blocked. Inspect with hcom term ${hcomNames.join(" ")}, then retry or stop.`,
       ...(modelNote ? { modelNote } : {}),
+      ...(reasoningNote ? { reasoningNote } : {}),
     };
   }
 
@@ -811,17 +811,17 @@ async function fetchScreenTailSafe(
 export function registerSpawnAndVerifyTool(server: any) {
   server.tool(
     "spawn_and_verify",
-    "Launch an agent and gate on readiness. Reuses the launch path unchanged; waits for the batch to reach a terminal state (one hcom events launch call, not a polling loop). Classifies ready / failed / timeout / blocked. With on_blocked=rescue, iterates allowlist-guarded rescue gates until ready. Persists outcome + latencyMs + reason on the registry record.",
+    "Launch an agent and gate on readiness. Reuses the launch path unchanged; waits for the batch to reach a terminal state (one hcom events launch call, not a polling loop). Classifies ready / failed / timeout / blocked. With on_blocked=rescue, iterates allowlist-guarded rescue gates until ready. Persists outcome + latencyMs + reason on the registry record. Returns { launch, outcomes, summary }. Preconditions: sender identity (see sender_name). Related: launch (no gate), unblock (manual rescue), launch_topology (verify=true).",
     {
       harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity, gemini, kilo, pi, omp, cursor, kimi, copilot)"),
       preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
-      model: z.string().optional().describe("Model name override or standalone model for bare launches"),
+      model: z.string().optional().describe("Model name override or standalone model for bare launches. Ignored for antigravity, which does not expose model selection."),
       prompt: z.string().optional().describe("Initial prompt for the agent"),
       tag: z.string().optional().describe("Tag for the agent (defaults to harness name for bare launches)"),
       dir: z.string().optional().describe("Working directory override"),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
-      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
-      reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
+      reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored — a reasoningNote is returned on the result)"),
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness (default: 60)"),
       on_blocked: z.enum(["report", "rescue"]).optional().describe("What to do when the agent is blocked on user attention (default: report)"),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
@@ -847,23 +847,17 @@ export function registerSpawnAndVerifyTool(server: any) {
       try {
         const callerName = await resolveCallerName(sender_name);
         if (!callerName) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_NO_SENDER,
+            "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+          );
         }
 
         if (!presetName && !model) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Error: Provide at least a preset or a model. Use list_presets to see available presets, or specify harness + model for a bare launch.",
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_PRESET_NOT_FOUND,
+            "Provide at least a preset or a model. Use list_presets to see available presets, or specify harness + model for a bare launch.",
+          );
         }
 
         let resolvedPreset: ResolvedLaunchPreset;
@@ -871,22 +865,16 @@ export function registerSpawnAndVerifyTool(server: any) {
           const config = loadMergedConfig(cwd);
           const preset = resolveAgentPreset(config, presetName);
           if (!preset) {
-            return {
-              content: [{
-                type: "text" as const,
-                text: `Error: Agent preset "${presetName}" not found. Available presets: ${Object.keys(config.agentPresets).join(", ")}. Use list_presets to inspect the merged preset catalog.`,
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_PRESET_NOT_FOUND,
+              `Agent preset "${presetName}" not found. Available presets: ${Object.keys(config.agentPresets).join(", ")}. Use list_presets to inspect the merged preset catalog.`,
+            );
           }
           if (!harness) {
-            return {
-              content: [{
-                type: "text" as const,
-                text: `Error: Launch preset "${preset.name}" requires an explicit harness. Supported: ${getSupportedHarnesses(preset).join(", ")}.`,
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_HARNESS_REQUIRED,
+              `Launch preset "${preset.name}" requires an explicit harness. Supported: ${getSupportedHarnesses(preset).join(", ")}.`,
+            );
           }
           resolvedPreset = resolvePresetHarness(preset, harness);
           if (model) resolvedPreset.model = model;
@@ -938,10 +926,7 @@ export function registerSpawnAndVerifyTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );
