@@ -4,7 +4,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registerLaunchTool, registerSpawnAndVerifyTool, registerTopologyLaunchTool } from "./tools/launch.js";
 import {
-  registerConfigPathsTool,
   registerListAllTool,
   registerListManagedTool,
   registerListPresetsTool,
@@ -28,7 +27,7 @@ import { isHcomAvailable } from "./hcom.js";
 const PORT = parseInt(process.env.HCOM_MCP_PORT ?? "3111", 10);
 
 function createHcomMcpServer(): McpServer {
-  const s = new McpServer({ name: "hcom-mcp", version: "0.1.0" });
+  const s = new McpServer({ name: "hcom-mcp", version: "0.2.0" });
   registerLaunchTool(s);
   registerSpawnAndVerifyTool(s);
   registerTopologyLaunchTool(s);
@@ -38,7 +37,6 @@ function createHcomMcpServer(): McpServer {
   registerModelResources(s);
   registerListPresetsTool(s);
   registerListTopologiesTool(s);
-  registerConfigPathsTool(s);
   registerStatusTool(s);
   registerInspectTool(s);
   registerTranscriptTool(s);

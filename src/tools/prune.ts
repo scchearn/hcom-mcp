@@ -1,19 +1,21 @@
 import { z } from "zod";
 import { execHcom } from "../hcom.js";
 import { pruneRecords } from "../registry.js";
+import { E_INTERNAL, E_PRUNE_KILL_FAILED, internalError, toolError } from "../errors.js";
 
 export function registerPruneTool(server: any) {
   server.tool(
     "prune",
-    "Remove stale registry records. Reconciles against live hcom state first (never-live records are demoted to lost where the age rules can reach them), then applies the age rules. By default targets managed_lost and adopted_lost records older than 7 days (dry-run only). Use confirm=true to actually remove records. Use includeStopped=true to also target managed_stopped and adopted_stopped records older than 30 days. Use expired=true to target expired ephemeral records (ttl_minutes launches): kills the agents and clears their records. Use allWorkspaces=true to prune every workspace in one call instead of one call per workspace.",
+    "Remove stale registry records. Reconciles against live hcom state first (never-live records are demoted to lost where the age rules can reach them), then applies the age rules. By default targets managed_lost and adopted_lost records older than 7 days (dry-run only). Use confirm=true to actually remove records. Use include_stopped=true to also target managed_stopped and adopted_stopped records older than 30 days. Use expired=true to target expired ephemeral records (ttl_minutes launches): kills the agents and clears their records. Use all_workspaces=true to prune every workspace in one call instead of one call per workspace. Returns { dryRun, message, count, stateBreakdown, names, killed? } plus records when verbose=true. Read-only (dry-run) by default; no sender identity required. Related: status (record counts), list_managed.",
     {
-      workspace: z.string().optional().describe("Workspace path (defaults to the server's working directory; pass explicitly when the server runs under a service manager so records are scoped to the workspace you query with list_managed). Ignored when allWorkspaces=true."),
+      workspace: z.string().optional().describe("Workspace path (defaults to the server's working directory; pass explicitly when the server runs under a service manager so records are scoped to the workspace you query with list_managed). Ignored when all_workspaces=true."),
       olderThanDays: z.number().optional().describe("DEPRECATED alias for lostOlderThanDays (kept for one release; use lostOlderThanDays)"),
       lostOlderThanDays: z.number().optional().describe("Minimum age in days for lost records to be pruned (default: 7)"),
       includeStopped: z.boolean().default(false).describe("Also target stopped records (managed_stopped, adopted_stopped)"),
       stoppedOlderThanDays: z.number().default(30).describe("Minimum age in days for stopped records to be pruned"),
       confirm: z.boolean().default(false).describe("Set to true to actually remove records (default is dry-run)"),
-      allWorkspaces: z.boolean().default(false).describe("Prune records across all workspaces in one call (default: only the given workspace)"),
+      allWorkspaces: z.boolean().default(false).describe("DEPRECATED camelCase alias for all_workspaces (kept for one release; use all_workspaces)"),
+      all_workspaces: z.boolean().default(false).describe("Prune records across all workspaces in one call (default: only the given workspace)"),
       expired: z.boolean().default(false).describe("Target expired ephemeral records (ttl_minutes launches): kill the agents and clear their records"),
       verbose: z.boolean().default(false).describe("Include the full removed records in the response (default: summary only)"),
     },
@@ -25,6 +27,7 @@ export function registerPruneTool(server: any) {
       stoppedOlderThanDays,
       confirm,
       allWorkspaces,
+      all_workspaces,
       expired,
       verbose,
     }: {
@@ -35,6 +38,7 @@ export function registerPruneTool(server: any) {
       stoppedOlderThanDays: number;
       confirm: boolean;
       allWorkspaces: boolean;
+      all_workspaces: boolean;
       expired: boolean;
       verbose: boolean;
     }) => {
@@ -45,6 +49,10 @@ export function registerPruneTool(server: any) {
         // are zod-optional so the registry-level default (7) applies when
         // neither is passed.
         const effectiveLostOlderThanDays = lostOlderThanDays ?? olderThanDays;
+        // all_workspaces is the canonical name; the camelCase alias is kept
+        // for one release. The explicit || false mirrors the zod defaults for
+        // direct handler invocation.
+        const effectiveAllWorkspaces = all_workspaces || allWorkspaces || false;
 
         // Expired mode kills the agents before clearing their records.
         if (expired && confirm) {
@@ -53,7 +61,7 @@ export function registerPruneTool(server: any) {
             includeStopped,
             stoppedOlderThanDays,
             confirm: false,
-            allWorkspaces,
+            allWorkspaces: effectiveAllWorkspaces,
             expired: true,
           });
           const killTargets = result.wouldRemove
@@ -71,21 +79,18 @@ export function registerPruneTool(server: any) {
             }
           }
           if (failedKills.length > 0) {
-            return {
-              content: [{
-                type: "text" as const,
-                text: `Error: failed to kill ${failedKills.join(", ")} before clearing records. ` +
-                  `No records were removed; retry after confirming the agents are gone.`,
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_PRUNE_KILL_FAILED,
+              `failed to kill ${failedKills.join(", ")} before clearing records. ` +
+                `No records were removed; retry after confirming the agents are gone.`,
+            );
           }
           const confirmed = await pruneRecords(cwd, {
             lostOlderThanDays: effectiveLostOlderThanDays,
             includeStopped,
             stoppedOlderThanDays,
             confirm: true,
-            allWorkspaces,
+            allWorkspaces: effectiveAllWorkspaces,
             expired: true,
           });
           return summarize(confirmed.removed, true, verbose, {
@@ -98,7 +103,7 @@ export function registerPruneTool(server: any) {
           includeStopped,
           stoppedOlderThanDays,
           confirm,
-          allWorkspaces,
+          allWorkspaces: effectiveAllWorkspaces,
           expired,
         });
 
@@ -108,10 +113,7 @@ export function registerPruneTool(server: any) {
 
         return summarize(result.removed, true, verbose);
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     },
   );

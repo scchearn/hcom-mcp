@@ -1,17 +1,18 @@
 import { z } from "zod";
 import { execHcom, parseHcomJson, resolveCallerName } from "../hcom.js";
+import { E_NO_SENDER, E_THREAD_FAILED, toolError } from "../errors.js";
 
 export function registerThreadSeedTool(server: any) {
   server.tool(
     "thread_seed",
-    "Create a workflow thread. Auto-includes the hub (calling agent) in the member list so the hub receives thread messages. Use instead of raw hcom send for thread creation when hcom-mcp is available.",
+    "Create a workflow thread. Auto-includes the hub (calling agent) in the member list so the hub receives thread messages. Use instead of raw hcom send for thread creation when hcom-mcp is available. Returns { threadName, senderName, hubName, mentions, seedDelivered, output }. The thread exists once the first --thread send lands; there is no separate creation step.",
     {
       thread_name: z.string().describe("Thread name, e.g. 'repo-task-1747354927'"),
       mentions: z.array(z.string()).describe("Target agents/tags, e.g. ['@eng-', '@review-']. @ prefix optional."),
       message: z.string().describe("Seed message body"),
       intent: z.enum(["request", "inform", "ack"]).optional().describe("Intent (default: inform)"),
-      sender_name: z.string().optional().describe("Sender identity for hcom delivery. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
-      hub_name: z.string().optional().describe("Hub agent name. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity for hcom delivery. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
+      hub_name: z.string().optional().describe("Hub agent name. Defaults to sender_name when omitted. Only override when the hub differs from the sender."),
     },
     async ({
       thread_name,
@@ -30,26 +31,22 @@ export function registerThreadSeedTool(server: any) {
     }) => {
       try {
         const resolvedSender = await resolveCallerName(sender_name);
-        const resolvedHub = await resolveCallerName(hub_name);
+        // hub_name defaults to the resolved sender; the hub is the caller
+        // unless explicitly overridden.
+        const resolvedHub = await resolveCallerName(hub_name ?? resolvedSender);
 
         if (!resolvedSender) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_NO_SENDER,
+            "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+          );
         }
 
         if (!resolvedHub) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Error: Cannot resolve hub name. For HTTP or unbound MCP callers, provide the hub_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_NO_SENDER,
+            "Cannot resolve hub name. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly (hub_name defaults to it). Bound hcom sessions may auto-resolve via 'hcom list self'.",
+          );
         }
 
         const normalizedMentions = mentions.map((m) => (m.startsWith("@") ? m : `@${m}`));
@@ -79,11 +76,11 @@ export function registerThreadSeedTool(server: any) {
             type: "text" as const,
             text: JSON.stringify(
               {
-                thread_name,
-                sender_name: resolvedSender,
-                hub_name: resolvedHub,
+                threadName: thread_name,
+                senderName: resolvedSender,
+                hubName: resolvedHub,
                 mentions: allMentions,
-                seed_delivered: result.exitCode === 0,
+                seedDelivered: result.exitCode === 0,
                 output: result.stdout || result.stderr,
               },
               null,
@@ -92,10 +89,7 @@ export function registerThreadSeedTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return toolError(E_THREAD_FAILED, err.message);
       }
     },
   );
@@ -104,7 +98,7 @@ export function registerThreadSeedTool(server: any) {
 export function registerThreadInspectTool(server: any) {
   server.tool(
     "thread_inspect",
-    "Query thread events with structured output. Read-only. Use to inspect what happened on a workflow thread.",
+    "Query thread events with structured output. Read-only; no sender identity required. Returns { threadName, eventCount, events }. See also thread_seed to create threads.",
     {
       thread_name: z.string().describe("Thread name to query"),
       last: z.number().optional().describe("Limit number of events (default: 20)"),
@@ -141,13 +135,10 @@ export function registerThreadInspectTool(server: any) {
         const result = await execHcom(args);
 
         if (result.exitCode !== 0) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Error querying thread: ${result.stderr || result.stdout}`,
-            }],
-            isError: true,
-          };
+          return toolError(
+            E_THREAD_FAILED,
+            `Error querying thread: ${result.stderr || result.stdout}`,
+          );
         }
 
         const events = result.stdout
@@ -161,8 +152,8 @@ export function registerThreadInspectTool(server: any) {
             type: "text" as const,
             text: JSON.stringify(
               {
-                thread_name,
-                event_count: events.length,
+                threadName: thread_name,
+                eventCount: events.length,
                 events,
               },
               null,
@@ -171,10 +162,7 @@ export function registerThreadInspectTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return toolError(E_THREAD_FAILED, err.message);
       }
     },
   );

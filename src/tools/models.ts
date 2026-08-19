@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { HarnessEnum } from "../types.js";
 import { listHarnessModels } from "../hcom.js";
+import { E_INTERNAL, internalError } from "../errors.js";
 
 const MODEL_RESOURCE_URIS = {
   all: "hcom://models",
@@ -32,7 +33,7 @@ function jsonResource(uri: string, payload: unknown) {
 export function registerListModelsTool(server: any) {
   server.tool(
     "list_models",
-    "List available models for harness(es). Supports live discovery where the harness CLI exposes a catalog and bundled catalogs where the harness model set is intentionally curated. For claude, full model IDs (e.g. claude-opus-4-8) are accepted pass-through in addition to the bundled aliases.",
+    "List available models for harness(es). Supports live discovery where the harness CLI exposes a catalog and bundled catalogs where the harness model set is intentionally curated. Returns { results, total }; each result carries harness, status (live/bundled/error), models, count, source, notes. For claude, full model IDs (e.g. claude-opus-4-8) are accepted pass-through in addition to the bundled aliases. antigravity returns an empty catalog (no --model selection). Read-only; no sender identity required. Related: launch (model validation), hcom://models resources.",
     {
       harness: HarnessEnum.optional().describe("Specific harness to query (claude, opencode, codex, antigravity, gemini, kilo, pi, omp, cursor, kimi, copilot). Omit to query all harnesses."),
     },
@@ -46,10 +47,7 @@ export function registerListModelsTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );

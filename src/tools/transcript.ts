@@ -5,6 +5,13 @@ import {
   listHcomAgents,
   parseHcomJson,
 } from "../hcom.js";
+import {
+  E_AGENT_NOT_FOUND,
+  E_NAME_REQUIRED,
+  E_PATTERN_REQUIRED,
+  E_TRANSCRIPT_FAILED,
+  toolError,
+} from "../errors.js";
 
 const TranscriptModeEnum = z.enum(["read", "search", "timeline"]);
 const TranscriptAgentTypeEnum = z.enum([
@@ -14,6 +21,7 @@ const TranscriptAgentTypeEnum = z.enum([
   "opencode",
   "kilo",
   "pi",
+  "omp",
   "antigravity",
   "cursor",
   "kimi",
@@ -23,7 +31,7 @@ const TranscriptAgentTypeEnum = z.enum([
 export function registerTranscriptTool(server: any) {
   server.tool(
     "transcript",
-    "Read hcom transcripts. Supports per-agent transcript reads (including range/full/detailed), cross-agent transcript search, and timeline view.",
+    "Read hcom transcripts. Supports per-agent transcript reads (including range/full/detailed), cross-agent transcript search, and timeline view. Returns { mode, agent?, transcript|result } where transcript/result is the parsed hcom JSON. Read-only; no sender identity required. Related: inspect (status/events/term), continue_from (handoff bundles).",
     {
       mode: TranscriptModeEnum.describe("Operation: read one agent transcript, search transcripts, or view the timeline"),
       name: z.string().optional().describe("Agent name for read mode"),
@@ -68,19 +76,13 @@ export function registerTranscriptTool(server: any) {
       try {
         if (mode === "read") {
           if (!name) {
-            return {
-              content: [{ type: "text" as const, text: "Error: name is required for transcript read mode" }],
-              isError: true,
-            };
+            return toolError(E_NAME_REQUIRED, "name is required for transcript read mode");
           }
 
           const agents = await listHcomAgents();
           const liveAgent = findLiveAgentByIdentifier(name, agents);
           if (!liveAgent) {
-            return {
-              content: [{ type: "text" as const, text: `Error: Agent "${name}" not found in hcom` }],
-              isError: true,
-            };
+            return toolError(E_AGENT_NOT_FOUND, `Agent "${name}" not found in hcom`);
           }
 
           const args = ["transcript", liveAgent.name];
@@ -95,10 +97,10 @@ export function registerTranscriptTool(server: any) {
 
           const result = await execHcom(args);
           if (result.exitCode !== 0) {
-            return {
-              content: [{ type: "text" as const, text: `Error reading transcript: ${result.stderr || result.stdout}` }],
-              isError: true,
-            };
+            return toolError(
+              E_TRANSCRIPT_FAILED,
+              `Error reading transcript: ${result.stderr || result.stdout}`,
+            );
           }
 
           return {
@@ -119,10 +121,7 @@ export function registerTranscriptTool(server: any) {
 
         if (mode === "search") {
           if (!pattern) {
-            return {
-              content: [{ type: "text" as const, text: "Error: pattern is required for transcript search mode" }],
-              isError: true,
-            };
+            return toolError(E_PATTERN_REQUIRED, "pattern is required for transcript search mode");
           }
 
           const args = ["transcript", "search", pattern];
@@ -135,10 +134,10 @@ export function registerTranscriptTool(server: any) {
 
           const result = await execHcom(args);
           if (result.exitCode !== 0) {
-            return {
-              content: [{ type: "text" as const, text: `Error searching transcripts: ${result.stderr || result.stdout}` }],
-              isError: true,
-            };
+            return toolError(
+              E_TRANSCRIPT_FAILED,
+              `Error searching transcripts: ${result.stderr || result.stdout}`,
+            );
           }
 
           return {
@@ -164,10 +163,10 @@ export function registerTranscriptTool(server: any) {
 
         const result = await execHcom(args);
         if (result.exitCode !== 0) {
-          return {
-            content: [{ type: "text" as const, text: `Error reading transcript timeline: ${result.stderr || result.stdout}` }],
-            isError: true,
-          };
+          return toolError(
+            E_TRANSCRIPT_FAILED,
+            `Error reading transcript timeline: ${result.stderr || result.stdout}`,
+          );
         }
 
         return {
@@ -184,10 +183,7 @@ export function registerTranscriptTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return toolError(E_TRANSCRIPT_FAILED, err.message);
       }
     },
   );

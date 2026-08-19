@@ -80,12 +80,12 @@ test('watch_agents poll derives blocked, silent_finisher, stalled, lost, unrepor
     execHcom: async (args) => {
       eventsCalls.push(args);
       if (args[0] === 'events' && args.includes('--type') && args.includes('life')) {
-        return { exitCode: 0, stdout: JSON.stringify([{ data: { action: 'ready' } }]), stderr: '' };
+        return { exitCode: 0, stdout: '{"action":"ready"}\n', stderr: '' };
       }
       if (args[0] === 'events' && args.includes('--type') && args.includes('message')) {
         // sile has a last report (silent finisher); fine has none (plain idle).
         if (args[args.length - 1] === 'sile') {
-          return { exitCode: 0, stdout: JSON.stringify([{ data: { from: 'sile', text: 'done' } }]), stderr: '' };
+          return { exitCode: 0, stdout: '{"from":"sile","text":"done"}\n', stderr: '' };
         }
         return { exitCode: 0, stdout: '', stderr: '' };
       }
@@ -113,6 +113,16 @@ test('watch_agents poll derives blocked, silent_finisher, stalled, lost, unrepor
   assert.deepEqual(byName.gone.flags, ['lost']);
   assert.deepEqual(byName.unre.flags, ['unreported']);
   assert.deepEqual(byName.fine.flags, []);
+
+  // Wave 6: returned payload obeys the camelCase contract.
+  assert.equal(byName.blok.statusAgeSeconds, 10);
+  assert.equal(byName.unre.unreadCount, 3);
+  assert.equal(byName.sile.lastLifeEvent, 'ready');
+  assert.match(byName.sile.lastMessage, /^sile: done$/);
+  assert.equal(byName.blok.status_age_seconds, undefined);
+  assert.equal(byName.blok.unread_count, undefined);
+  assert.equal(byName.blok.last_life_event, undefined);
+  assert.equal(byName.blok.last_message, undefined);
 
   assert.equal(payload.summary.blocked, 1);
   assert.equal(payload.summary.silent_finisher, 1);
@@ -199,7 +209,8 @@ test('watch_agents subscribe installs life and blocked subs for the caller', asy
   assert.equal(payload.subscriptions.length, 2);
   assert.equal(payload.subscriptions[0].kind, 'life');
   assert.equal(payload.subscriptions[1].kind, 'blocked');
-  assert.equal(payload.subscriptions[0].sub_id, 'sub-abc123');
+  assert.equal(payload.subscriptions[0].subId, 'sub-abc123');
+  assert.equal(payload.subscriptions[0].sub_id, undefined);
 
   // Both subs are installed on behalf of the caller.
   assert.ok(subCalls.every((args) => args.includes('--for') && args.includes('nora')));

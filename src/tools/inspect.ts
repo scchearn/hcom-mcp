@@ -7,11 +7,12 @@ import {
   parseHcomJson,
 } from "../hcom.js";
 import { getOwnedRecordsByWorkspace } from "../registry.js";
+import { E_AGENT_NOT_FOUND, E_INTERNAL, internalError, toolError } from "../errors.js";
 
 export function registerInspectTool(server: any) {
   server.tool(
     "inspect",
-    "Inspect any live hcom agent: status, transcript, events, or terminal screen. Returns managementStatus (managed/adopted/unmanaged) along with inspect data.",
+    "Inspect any live hcom agent: status, transcript, events, or terminal screen. Returns { agent, managementStatus (managed/adopted/unmanaged), inspect } where inspect is the per-aspect payload (status: agent JSON; transcript: text; events: parsed event array; term: parsed screen). Precondition: the agent must be live in hcom (E_AGENT_NOT_FOUND otherwise). Read-only; no sender identity required. Related: list_all (discover agents), transcript (richer reads).",
     {
       name: z.string().describe("hcom agent name to inspect"),
       aspect: z.enum(["status", "transcript", "events", "term"]).describe("What to inspect"),
@@ -33,13 +34,7 @@ export function registerInspectTool(server: any) {
         const canonicalName = canonicalizeAgentName(name, allAgents);
         const liveAgent = findLiveAgentByIdentifier(canonicalName, allAgents);
         if (!liveAgent) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Error: Agent "${name}" not found in hcom`,
-            }],
-            isError: true,
-          };
+          return toolError(E_AGENT_NOT_FOUND, `Agent "${name}" not found in hcom`);
         }
 
         // Determine management status
@@ -117,10 +112,7 @@ export function registerInspectTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );

@@ -9,6 +9,7 @@ import {
 } from "../hcom.js";
 import { getOwnedRecordsByWorkspace } from "../registry.js";
 import type { HcomAgent, RegistryRecord } from "../types.js";
+import { E_INTERNAL, E_NO_SENDER, internalError, toolError } from "../errors.js";
 
 const WatchModeEnum = z.enum(["poll", "subscribe"]);
 
@@ -77,11 +78,11 @@ export async function buildWatchLine(
 ): Promise<{
   name: string;
   status: string | null;
-  status_age_seconds: number | null;
-  unread_count: number | null;
+  statusAgeSeconds: number | null;
+  unreadCount: number | null;
   flags: string[];
-  last_life_event: string | null;
-  last_message: string | null;
+  lastLifeEvent: string | null;
+  lastMessage: string | null;
 }> {
   const live = findLiveAgentByIdentifier(record.hcomName ?? "", liveAgents);
   const flags: string[] = [];
@@ -91,11 +92,11 @@ export async function buildWatchLine(
     return {
       name: record.hcomName ?? record.id,
       status: null,
-      status_age_seconds: null,
-      unread_count: null,
+      statusAgeSeconds: null,
+      unreadCount: null,
       flags,
-      last_life_event: null,
-      last_message: null,
+      lastLifeEvent: null,
+      lastMessage: null,
     };
   }
 
@@ -129,11 +130,11 @@ export async function buildWatchLine(
   return {
     name: live.name,
     status: live.status,
-    status_age_seconds: age,
-    unread_count: unread,
+    statusAgeSeconds: age,
+    unreadCount: unread,
     flags,
-    last_life_event: lastLife,
-    last_message: lastMessageText,
+    lastLifeEvent: lastLife,
+    lastMessage: lastMessageText,
   };
 }
 
@@ -147,14 +148,14 @@ export async function buildWatchLine(
 export function registerWatchAgentsTool(server: any) {
   server.tool(
     "watch_agents",
-    "Supervise owned agents between spawn and kill. Poll mode returns a summarized snapshot (one line per agent) with derived flags: blocked (needs human), silent_finisher (listening past report_timeout with no dispatch), stalled (active past report_timeout), lost (record present, live gone), unreported (unconsumed messages). Subscribe mode installs hcom event subscriptions that wake the hub via hcom message. Reporting only — never auto-kills.",
+    "Supervise owned agents between spawn and kill. Poll mode returns a summarized snapshot (one line per agent) with derived flags: blocked (needs human), silent_finisher (listening past report_timeout with no dispatch), stalled (active past report_timeout), lost (record present, live gone), unreported (unconsumed messages). Subscribe mode installs hcom event subscriptions that wake the hub via hcom message. Reporting only — never auto-kills. Poll returns { mode, agents, summary }; subscribe returns { mode, caller, subscriptions, total, note }. Preconditions: subscribe mode requires sender identity (see sender_name). Related: unblock (rescue blocked), stop/kill (act on flags).",
     {
       names: z.array(z.string()).optional().describe("Agent names to watch. Omit to watch all owned records in the workspace."),
       tag: z.string().optional().describe("Watch only records whose live agent carries this tag."),
       workspace: z.string().optional().describe("Workspace path for ownership resolution. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
       mode: WatchModeEnum.optional().describe("poll: sync snapshot (default). subscribe: install hcom event subscriptions and return their ids."),
       report_timeout_sec: z.number().int().positive().default(300).describe("Seconds of quiet before an agent is flagged silent_finisher or stalled (default: 300)."),
-      sender_name: z.string().optional().describe("Sender identity for subscribe mode. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity for subscribe mode. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
     },
     async ({ names, tag, workspace, mode, report_timeout_sec, sender_name }: {
       names?: string[];
@@ -186,16 +187,13 @@ export function registerWatchAgentsTool(server: any) {
         if (mode === "subscribe") {
           const caller = await resolveCallerName(sender_name);
           if (!caller) {
-            return {
-              content: [{
-                type: "text" as const,
-                text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-              }],
-              isError: true,
-            };
+            return toolError(
+              E_NO_SENDER,
+              "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+            );
           }
 
-          const subscriptions: { agent: string; sub_id: string | null; kind: string; error?: string }[] = [];
+          const subscriptions: { agent: string; subId: string | null; kind: string; error?: string }[] = [];
           for (const record of scoped) {
             const name = record.hcomName;
             if (!name) continue;
@@ -209,7 +207,7 @@ export function registerWatchAgentsTool(server: any) {
               subscriptions.push({
                 agent: name,
                 kind,
-                sub_id: subId,
+                subId,
                 ...(result.exitCode !== 0 ? { error: result.stderr || result.stdout } : {}),
               });
             }
@@ -258,10 +256,7 @@ export function registerWatchAgentsTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     },
   );

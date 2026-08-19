@@ -75,7 +75,7 @@ digraph mcp_vs_raw {
 | Need | Preferred surface |
 |---|---|
 | discover saved launch options | `list_presets`, `list_topologies` |
-| understand current state | `status`, `config_paths`, `list_all`, `list_managed` |
+| understand current state | `status` (includes config and registry paths), `list_all`, `list_managed` |
 | inspect one managed agent | `inspect` |
 | read a live agent's runtime model | `inspect` with `aspect: "term"` |
 | read/search transcript history | `transcript` |
