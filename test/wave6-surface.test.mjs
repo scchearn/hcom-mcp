@@ -647,6 +647,71 @@ test('codex launch returns a reasoningNote and never passes reasoning flags', as
   assert.equal(capturedArgs.includes('--effort'), false);
 });
 
+// --- watch_agents returned JSON camelCase (LOW-1) ---
+
+test('watch_agents poll returns camelCase keys and subscribe returns subId', async (t) => {
+  const eventsCalls = [];
+
+  t.mock.module('../dist/hcom.js', {
+    namedExports: hcomMock({
+      listHcomAgents: async () => [
+        { name: 'blok', base_name: 'blok', status: 'blocked', status_age_seconds: 10, unread_count: 0, tag: null },
+        { name: 'sile', base_name: 'sile', status: 'listening', status_age_seconds: 600, unread_count: 0, tag: null },
+      ],
+      execHcom: async (args) => {
+        eventsCalls.push(args);
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
+        if (args[0] === 'events' && args.includes('--type') && args.includes('life')) {
+          return { exitCode: 0, stdout: '{"action":"ready"}\n', stderr: '' };
+        }
+        if (args[0] === 'events' && args.includes('--type') && args.includes('message')) {
+          if (args[args.length - 1] === 'sile') {
+            return { exitCode: 0, stdout: '{"from":"sile","text":"done"}\n', stderr: '' };
+          }
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        throw new Error(`unexpected args: ${args.join(' ')}`);
+      },
+    }),
+  });
+  t.mock.module('../dist/registry.js', {
+    namedExports: registryMock({
+      getOwnedRecordsByWorkspace: () => [
+        { id: 'r1', workspace: '/repo', hcomName: 'blok', state: 'managed_active' },
+        { id: 'r2', workspace: '/repo', hcomName: 'sile', state: 'managed_active' },
+      ],
+    }),
+  });
+
+  const { registerWatchAgentsTool } = await loadModule('tools/watch.js');
+  const server = createFakeServer();
+  registerWatchAgentsTool(server);
+
+  const poll = await server.handlers.get('watch_agents')({ workspace: '/repo' });
+  assert.ok(!poll.isError, poll?.content?.[0]?.text);
+  const pollPayload = JSON.parse(poll.content[0].text);
+  const byName = Object.fromEntries(pollPayload.agents.map((a) => [a.name, a]));
+  assert.equal(byName.blok.statusAgeSeconds, 10);
+  assert.equal(byName.sile.lastLifeEvent, 'ready');
+  assert.match(byName.sile.lastMessage, /^sile: done$/);
+  assert.equal(byName.blok.status_age_seconds, undefined);
+  assert.equal(byName.blok.unread_count, undefined);
+  assert.equal(byName.blok.last_life_event, undefined);
+  assert.equal(byName.blok.last_message, undefined);
+
+  const sub = await server.handlers.get('watch_agents')({
+    workspace: '/repo',
+    mode: 'subscribe',
+    sender_name: 'nora',
+  });
+  assert.ok(!sub.isError, sub?.content?.[0]?.text);
+  const subPayload = JSON.parse(sub.content[0].text);
+  assert.equal(subPayload.subscriptions[0].subId, 'sub-abc123');
+  assert.equal(subPayload.subscriptions[0].sub_id, undefined);
+});
+
 // --- antigravity skips model validation ---
 
 test('validatePresetModelAvailability skips antigravity without touching the catalog', async (t) => {

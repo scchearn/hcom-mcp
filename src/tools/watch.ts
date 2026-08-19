@@ -78,11 +78,11 @@ export async function buildWatchLine(
 ): Promise<{
   name: string;
   status: string | null;
-  status_age_seconds: number | null;
-  unread_count: number | null;
+  statusAgeSeconds: number | null;
+  unreadCount: number | null;
   flags: string[];
-  last_life_event: string | null;
-  last_message: string | null;
+  lastLifeEvent: string | null;
+  lastMessage: string | null;
 }> {
   const live = findLiveAgentByIdentifier(record.hcomName ?? "", liveAgents);
   const flags: string[] = [];
@@ -92,11 +92,11 @@ export async function buildWatchLine(
     return {
       name: record.hcomName ?? record.id,
       status: null,
-      status_age_seconds: null,
-      unread_count: null,
+      statusAgeSeconds: null,
+      unreadCount: null,
       flags,
-      last_life_event: null,
-      last_message: null,
+      lastLifeEvent: null,
+      lastMessage: null,
     };
   }
 
@@ -130,11 +130,11 @@ export async function buildWatchLine(
   return {
     name: live.name,
     status: live.status,
-    status_age_seconds: age,
-    unread_count: unread,
+    statusAgeSeconds: age,
+    unreadCount: unread,
     flags,
-    last_life_event: lastLife,
-    last_message: lastMessageText,
+    lastLifeEvent: lastLife,
+    lastMessage: lastMessageText,
   };
 }
 
@@ -193,7 +193,7 @@ export function registerWatchAgentsTool(server: any) {
             );
           }
 
-          const subscriptions: { agent: string; sub_id: string | null; kind: string; error?: string }[] = [];
+          const subscriptions: { agent: string; subId: string | null; kind: string; error?: string }[] = [];
           for (const record of scoped) {
             const name = record.hcomName;
             if (!name) continue;
@@ -207,7 +207,7 @@ export function registerWatchAgentsTool(server: any) {
               subscriptions.push({
                 agent: name,
                 kind,
-                sub_id: subId,
+                subId,
                 ...(result.exitCode !== 0 ? { error: result.stderr || result.stdout } : {}),
               });
             }
