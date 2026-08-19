@@ -16,7 +16,7 @@ export function registerInspectTool(server: any) {
       name: z.string().describe("hcom agent name to inspect"),
       aspect: z.enum(["status", "transcript", "events", "term"]).describe("What to inspect"),
       last: z.number().optional().describe("Last N items (for transcript/events)"),
-      workspace: z.string().optional().describe("Workspace path for ownership verification"),
+      workspace: z.string().optional().describe("Workspace path for ownership verification. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace."),
     },
     async ({ name, aspect, last, workspace }: {
       name: string;

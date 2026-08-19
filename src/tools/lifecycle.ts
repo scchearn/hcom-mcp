@@ -99,7 +99,7 @@ export function registerLifecycleTools(server: any) {
     "Stop (disconnect) a managed or adopted agent",
     {
       name: z.string().describe("hcom agent name"),
-      workspace: z.string().optional().describe("Workspace path"),
+      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
     },
     async ({ name, workspace, sender_name }: { name: string; workspace?: string; sender_name?: string }) => {
@@ -157,7 +157,7 @@ export function registerLifecycleTools(server: any) {
     "Kill a managed or adopted agent and close its terminal pane",
     {
       name: z.string().describe("hcom agent name"),
-      workspace: z.string().optional().describe("Workspace path"),
+      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
     },
     async ({ name, workspace, sender_name }: { name: string; workspace?: string; sender_name?: string }) => {

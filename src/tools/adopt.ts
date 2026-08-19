@@ -20,7 +20,7 @@ export function registerAdoptTool(server: any) {
     "Adopt an existing hcom agent into managed lifecycle. Creates an adopted registry record for an agent that was not spawned by hcom-mcp, enabling stop/kill management. Requires the agent to be live in hcom. Sends an hcom inform message to the adoptee with adoption instructions (hub name, harness, workspace, and the 'using-hcom' skill loading instruction).",
     {
       name: z.string().describe("hcom agent name to adopt"),
-      workspace: z.string().optional().describe("Workspace path for registry"),
+      workspace: z.string().optional().describe("Workspace path for registry. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so the record is scoped to the workspace you query with list_managed."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
     },
     async ({ name, workspace, sender_name }: { name: string; workspace?: string; sender_name?: string }) => {

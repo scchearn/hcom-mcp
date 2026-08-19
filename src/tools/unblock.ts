@@ -250,7 +250,7 @@ export function registerUnblockTool(server: any) {
     "Guarded PTY rescue for a blocked agent. Dry-run by default: returns the terminal screen tail and pending launch_blocked detail without injecting anything. With dry_run=false, injects a single Enter (or optional text) only when the blocked detail matches the config rescue allowlist, then re-checks and transitions the registry record managed_blocked -> managed_active on success. One rescue attempt max; a dialog surviving one Enter needs a human.",
     {
       name: z.string().describe("hcom agent name"),
-      workspace: z.string().optional().describe("Workspace path for ownership verification"),
+      workspace: z.string().optional().describe("Workspace path for ownership verification. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
       dry_run: z.boolean().optional().describe("Report only, inject nothing (default: true)"),
       text: z.string().optional().describe("Optional text to inject; Enter-only when omitted"),
