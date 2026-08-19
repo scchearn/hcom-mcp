@@ -10,7 +10,7 @@ export function registerInspectTool(server: any) {
       name: z.string().describe("hcom agent name to inspect"),
       aspect: z.enum(["status", "transcript", "events", "term"]).describe("What to inspect"),
       last: z.number().optional().describe("Last N items (for transcript/events)"),
-      workspace: z.string().optional().describe("Workspace path for ownership verification"),
+      workspace: z.string().optional().describe("Workspace path for ownership verification. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace."),
     },
     async ({ name, aspect, last, workspace }: {
       name: string;
@@ -72,14 +72,17 @@ export function registerInspectTool(server: any) {
 
           case "events": {
             const n = last ?? 20;
-            const hcomResult = await execHcom(["events", "--last", String(n), "--agent", name, "--json"]);
+            // hcom events emits NDJSON by default; there is no --json flag.
+            // Parse each line exactly like thread_inspect does.
+            const hcomResult = await execHcom(["events", "--last", String(n), "--agent", name]);
             if (hcomResult.exitCode !== 0) {
-              // events --json might not exist, fall back to plain output
-              const fallback = await execHcom(["events", "--last", String(n), "--agent", name]);
-              result = fallback.stdout;
-            } else {
-              result = parseHcomJson(hcomResult.stdout);
+              throw new Error(`hcom events failed: ${hcomResult.stderr}`);
             }
+            result = hcomResult.stdout
+              .split("\n")
+              .filter((line: string) => line.trim())
+              .map((line: string) => parseHcomJson(line))
+              .filter(Boolean);
             break;
           }
 
