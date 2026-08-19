@@ -104,11 +104,14 @@ Operating guidance ships in `skills/`:
 | `spawn_and_verify` | Launch + gate on readiness, with optional guarded rescue of blocked agents |
 | `launch_topology` | Launch multiple agents from a topology preset (optional `verify` gate) |
 | `adopt` | Adopt an external hcom agent into managed lifecycle |
-| `stop` / `kill` | Stop or kill a managed agent |
+| `stop` / `kill` | Stop or kill managed agents (one or more names, or a tag) |
 | `unblock` | Guarded PTY rescue for a blocked agent (dry-run by default, config allowlist) |
+| `watch_agents` | Supervise owned agents: poll snapshot with derived flags, or subscribe to life/blocked events |
+| `resume` / `fork` | Resume a stopped agent or fork a session, registering ownership with a `resumedFrom` link |
+| `send` | Send an hcom message to one or more agents (request/inform/ack, optional reply_to) |
 | `list_managed` | List agents managed by this server |
 | `list_all` | List all live hcom agents |
-| `list_models` | List available models per harness |
+| `list_models` | List available models per harness (claude full IDs pass through unverified) |
 | `list_presets` | List configured agent presets |
 | `list_topologies` | List configured topology presets |
 | `inspect` | Inspect an agent's status, transcript, events, or terminal |
@@ -118,7 +121,7 @@ Operating guidance ships in `skills/`:
 | `thread_seed` | Create a workflow thread |
 | `thread_inspect` | Query thread events |
 | `config_paths` | Show config and registry paths |
-| `status` | Server health and orientation |
+| `status` | Server health and orientation (includes `hcom status --json` health) |
 
 ## License
 
