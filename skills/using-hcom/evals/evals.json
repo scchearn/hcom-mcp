@@ -94,7 +94,7 @@
       "prompt": "If hcom-mcp is connected, should I inspect files to discover presets and topologies, or should I use the MCP?",
       "expected_output": "A response that prefers the MCP surface for discovery and state, and reserves file inspection for fallback or explicit config work.",
       "assertions": [
-        "The output prefers hcom-mcp tools such as status, list_presets, list_topologies, or config_paths for discovery",
+        "The output prefers hcom-mcp tools such as status (which includes config and registry paths), list_presets, list_topologies for discovery",
         "The output does not recommend repo searching or config-file reads as the first discovery step",
         "The output keeps raw hcom positioned as the communication plane rather than the discovery plane"
       ]

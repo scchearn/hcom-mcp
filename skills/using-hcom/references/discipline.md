@@ -28,7 +28,7 @@ Common mistakes, rationalization counters, and red flags for hcom coordination.
 | putting `--thread` on `hcom opencode` or other spawn commands | put `--thread` on `hcom send` and `hcom events`, not on spawn commands; do not use `hcom listen` for normal worker replies |
 | escalating every handoff back through the hub | allow peer handoffs on the same thread when review or specialization needs it |
 | answering with generic `hcom` commands but no routing defaults | state the hub, headless-worker, thread, and report-flow defaults explicitly |
-| reading config files or using globs to discover saved presets/topologies while `hcom-mcp` is connected | use `list_presets`, `list_topologies`, `status`, and `config_paths` first |
+| reading config files or using globs to discover saved presets/topologies while `hcom-mcp` is connected | use `list_presets`, `list_topologies`, `status` first (it includes config and registry paths) |
 | using raw launch commands when the real need is a managed preset/topology launch | prefer `launch` or `launch_topology`, then switch to raw `hcom send` for coordination |
 
 ## Rationalizations To Reject
@@ -51,7 +51,7 @@ Common mistakes, rationalization counters, and red flags for hcom coordination.
 | "I should ack this inform so they know I saw it" | No. Informational messages do not need acknowledgment; send nothing unless a separate `inform` update is actually useful. |
 | "Every update has to come back through me" | Let workers hand off directly when the topology needs it, but keep the thread shared. |
 | "This question needs a script or a team-plan artifact" | Stay in operating-guidance scope unless the user explicitly asks for automation or design artifacts. |
-| "I should read config files or search the repo to discover presets/topologies" | If `hcom-mcp` is connected, use `list_presets`, `list_topologies`, `status`, or `config_paths` instead of filesystem discovery. |
+| "I should read config files or search the repo to discover presets/topologies" | If `hcom-mcp` is connected, use `list_presets`, `list_topologies`, `status` (which includes config and registry paths) instead of filesystem discovery. |
 | "Because this is an hcom question, all launch/discovery should be raw CLI" | Use `hcom-mcp` for the control plane when available; use raw `hcom` for the communication plane. |
 
 ## Red Flags

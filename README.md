@@ -120,8 +120,7 @@ Operating guidance ships in `skills/`:
 | `prune` | Remove stale registry records |
 | `thread_seed` | Create a workflow thread |
 | `thread_inspect` | Query thread events |
-| `config_paths` | Show config and registry paths |
-| `status` | Server health and orientation (includes `hcom status --json` health) |
+| `status` | Server health and orientation (includes `hcom status --json` health, config/registry paths) |
 
 ## License
 
