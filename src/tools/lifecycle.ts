@@ -105,7 +105,14 @@ export async function resolveTeardownTargets(
   senderName?: string,
   workspace?: string,
 ): Promise<
-  | { ok: true; cwd: string; targets: { record: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }[] }
+  | {
+      ok: true;
+      cwd: string;
+      targets: { record: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }[];
+      // Per-name validation failures (unowned/self-protection) when some
+      // names resolved and others did not. Present only on partial success.
+      failures?: string[];
+    }
   | { ok: false; response: { content: { type: "text"; text: string }[]; isError: true } }
 > {
   const cwd = workspace ?? process.cwd();
@@ -263,7 +270,7 @@ export function registerLifecycleTools(server: any) {
       const resolution = await resolveTeardownTargets(names, tag, "stop", sender_name, workspace);
       if (!resolution.ok) return resolution.response;
 
-      const { cwd, targets, failures } = resolution as { cwd: string; targets: { record: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }[]; failures?: string[] };
+      const { cwd, targets, failures } = resolution;
 
       const results = await runTeardown(targets, "stop");
 
@@ -298,7 +305,7 @@ export function registerLifecycleTools(server: any) {
       const resolution = await resolveTeardownTargets(names, tag, "kill", sender_name, workspace);
       if (!resolution.ok) return resolution.response;
 
-      const { cwd, targets, failures } = resolution as { cwd: string; targets: { record: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }[]; failures?: string[] };
+      const { cwd, targets, failures } = resolution;
 
       const results = await runTeardown(targets, "kill");
 

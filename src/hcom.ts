@@ -245,6 +245,10 @@ const BUNDLED_CODEX_MODELS = [
 // Bundled catalogs for the remaining harnesses. Only models that can be
 // verified to exist are cataloged; the harness CLI is the authority on what
 // it accepts, so these are hints, not a closed set.
+// Verified 2026-08-19 against each harness's `hcom <harness> --help` model
+// line: gemini (gemini-3.1-pro-preview|gemini-2.5-flash), kilo
+// (kilo/kilo-auto/free), pi (claude-3-5-sonnet), omp (claude-3-5-sonnet),
+// cursor (sonnet-4), kimi (kimi-k2.6), copilot (claude-haiku-4.5).
 const BUNDLED_GEMINI_MODELS = ["gemini-3.1-pro-preview", "gemini-2.5-flash"];
 const BUNDLED_KILO_MODELS = ["kilo/kilo-auto/free"];
 const BUNDLED_PI_MODELS = ["claude-3-5-sonnet"];

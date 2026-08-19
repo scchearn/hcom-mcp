@@ -233,10 +233,13 @@ export function registerWatchAgentsTool(server: any) {
           };
         }
 
-        // Poll mode: one line per agent, summarized.
-        const lines = await Promise.all(
-          scoped.map((record) => buildWatchLine(record, liveAgents, timeoutSec)),
-        );
+        // Poll mode: one line per agent, summarized. Sequential loop, not
+        // Promise.all: each line spawns up to 2 hcom events subprocesses, and
+        // an unbounded fan-out over a large fleet would saturate the CLI.
+        const lines: Awaited<ReturnType<typeof buildWatchLine>>[] = [];
+        for (const record of scoped) {
+          lines.push(await buildWatchLine(record, liveAgents, timeoutSec));
+        }
 
         const summary = {
           total: lines.length,
