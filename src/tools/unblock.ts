@@ -147,12 +147,12 @@ export async function runUnblock(
     return { ok: false, isError: true, text: validation.response.content[0].text };
   }
 
-  const { owned } = validation;
+  const { owned, canonicalName } = validation;
 
   // Refuse unless the agent is live AND currently blocked. Injecting Enter
   // into a working agent is silent corruption.
   const agents = await listHcomAgents();
-  const live = findLiveAgentByIdentifier(name, agents);
+  const live = findLiveAgentByIdentifier(canonicalName, agents);
   if (!live) {
     return {
       ok: false,
@@ -168,8 +168,8 @@ export async function runUnblock(
     };
   }
 
-  const blockedDetail = await fetchBlockedDetail(name, execHcomFn);
-  const screenTail = await fetchScreenTail(name, execHcomFn);
+  const blockedDetail = await fetchBlockedDetail(canonicalName, execHcomFn);
+  const screenTail = await fetchScreenTail(canonicalName, execHcomFn);
 
   const report = {
     agent: name,
@@ -211,7 +211,7 @@ export async function runUnblock(
     };
   }
 
-  const injection = await injectRescue(name, options.text, execHcomFn);
+  const injection = await injectRescue(canonicalName, options.text, execHcomFn);
   if (!injection.ok) {
     return {
       ok: false,
@@ -220,7 +220,7 @@ export async function runUnblock(
     };
   }
 
-  const recheck = await recheckAfterRescue(name, options.waitSec ?? 15, execHcomFn);
+  const recheck = await recheckAfterRescue(canonicalName, options.waitSec ?? 15, execHcomFn);
 
   // Registry transition: managed_blocked → managed_active on success.
   if (recheck.state === "ready" && owned.state === "managed_blocked") {

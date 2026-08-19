@@ -137,6 +137,45 @@ export function findLiveAgentByIdentifier(
   );
 }
 
+/**
+ * Canonicalize an incoming agent identifier to its base form.
+ *
+ * hcom resolves `@tag-` prefixes as groups and display names are
+ * `<tag>-<base>`; the registry stores base names on records (hcomName).
+ * Every guard, ownership, idempotency, and registry operation must compare
+ * canonical base names, or tag-prefixed display names silently miss their
+ * records (and a hub can kill its own tag-prefixed form).
+ *
+ * Resolution order:
+ * 1. Strip a leading `@`.
+ * 2. Match the live agent list by display name OR base name -> base_name.
+ * 3. Fallback for non-live agents: strip a `<tag>-` prefix when the tag is a
+ *    live tag (base names are 4-letter CVCV words, so the last `-` separates
+ *    tag from base; remote `name:DEVICE` forms contain no `-` and pass
+ *    through untouched).
+ * 4. Otherwise return the stripped identifier unchanged so error messages
+ *    stay honest ("not found") instead of inventing a canonical form.
+ */
+export function canonicalizeAgentName(
+  identifier: string,
+  agents: HcomAgent[],
+): string {
+  const stripped = identifier.startsWith("@") ? identifier.slice(1) : identifier;
+  if (!stripped) return stripped;
+
+  const live = findLiveAgentByIdentifier(stripped, agents);
+  if (live) return live.base_name;
+
+  const dashIdx = stripped.lastIndexOf("-");
+  if (dashIdx > 0) {
+    const tag = stripped.slice(0, dashIdx);
+    const base = stripped.slice(dashIdx + 1);
+    if (agents.some((agent) => agent.tag === tag)) return base;
+  }
+
+  return stripped;
+}
+
 // --- Model discovery helpers ---
 
 /**

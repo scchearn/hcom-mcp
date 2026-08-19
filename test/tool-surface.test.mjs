@@ -387,6 +387,7 @@ test('stop errors clearly when sender_name is missing for stateless HTTP callers
       resolveCallerName: async (override) => override,
       listHcomAgents: async () => [{ name: 'zore', base_name: 'zore', status: 'listening' }],
       findLiveAgentByIdentifier: () => ({ name: 'zore', base_name: 'zore', status: 'listening' }),
+      canonicalizeAgentName: (id) => (id.startsWith('@') ? id.slice(1) : id),
       execHcom: async () => {
         throw new Error('execHcom should not be called when sender identity is missing');
       },
@@ -419,6 +420,7 @@ test('kill errors clearly when sender_name is missing for stateless HTTP callers
       resolveCallerName: async (override) => override,
       listHcomAgents: async () => [{ name: 'zore', base_name: 'zore', status: 'listening' }],
       findLiveAgentByIdentifier: () => ({ name: 'zore', base_name: 'zore', status: 'listening' }),
+      canonicalizeAgentName: (id) => (id.startsWith('@') ? id.slice(1) : id),
       execHcom: async () => {
         throw new Error('execHcom should not be called when sender identity is missing');
       },

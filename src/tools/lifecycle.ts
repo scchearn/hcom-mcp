@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { execHcom, findLiveAgentByIdentifier, listHcomAgents, resolveCallerName } from "../hcom.js";
+import {
+  canonicalizeAgentName,
+  execHcom,
+  findLiveAgentByIdentifier,
+  listHcomAgents,
+  resolveCallerName,
+} from "../hcom.js";
 import { getOwnedRecordsByWorkspace, updateRecordState } from "../registry.js";
 import type { RegistryRecord, HcomAgent } from "../types.js";
 
@@ -12,6 +18,12 @@ function formatManagedNames(names: Array<string | undefined>) {
  * Shared validation for stop/kill targets:
  * 1. Hub self-protection — prevents stopping/killing the calling hub agent
  * 2. Ownership check — agent must have a non-released record in this workspace
+ *
+ * The incoming name is canonicalized to its base form (see
+ * canonicalizeAgentName) before every comparison: the registry stores base
+ * names, so a tag-prefixed display name must resolve to the same record, and
+ * the hub self-protection must hold against the caller's own tag-prefixed
+ * form (a hub killing `w3-vade` must be refused just like `vade`).
  */
 export async function validateStopKillTarget(
   name: string,
@@ -19,7 +31,7 @@ export async function validateStopKillTarget(
   senderName?: string,
   workspace?: string,
 ): Promise<
-  | { ok: true; cwd: string; owned: RegistryRecord; liveAgent: HcomAgent | null }
+  | { ok: true; cwd: string; owned: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }
   | { ok: false; response: { content: { type: "text"; text: string }[]; isError: true } }
 > {
   const cwd = workspace ?? process.cwd();
@@ -38,7 +50,15 @@ export async function validateStopKillTarget(
       },
     };
   }
-  if (caller === name) {
+
+  const liveAgents = await listHcomAgents();
+  const canonicalName = canonicalizeAgentName(name, liveAgents);
+  const liveAgent = findLiveAgentByIdentifier(canonicalName, liveAgents);
+
+  // Self-protection compares the caller against the target's canonical base
+  // name AND its live display name: a hub killing its own tag-prefixed form
+  // must be refused exactly like its bare form.
+  if (caller === canonicalName || caller === liveAgent?.name) {
     return {
       ok: false,
       response: {
@@ -50,9 +70,7 @@ export async function validateStopKillTarget(
 
   // Ownership check
   const records = getOwnedRecordsByWorkspace(cwd);
-  const owned = records.find((r) => r.hcomName === name);
-  const liveAgents = await listHcomAgents();
-  const liveAgent = findLiveAgentByIdentifier(name, liveAgents);
+  const owned = records.find((r) => r.hcomName === canonicalName);
 
   if (!owned) {
     return {
@@ -71,7 +89,7 @@ export async function validateStopKillTarget(
     };
   }
 
-  return { ok: true, cwd, owned, liveAgent };
+  return { ok: true, cwd, owned, liveAgent, canonicalName };
 }
 
 export function registerLifecycleTools(server: any) {
@@ -88,7 +106,7 @@ export function registerLifecycleTools(server: any) {
       const validation = await validateStopKillTarget(name, "stop", sender_name, workspace);
       if (!validation.ok) return validation.response;
 
-      const { cwd, owned, liveAgent } = validation;
+      const { cwd, owned, liveAgent, canonicalName } = validation;
 
       // Stale record check (covers both managed_lost and adopted_lost)
       const isLost = owned.state === "managed_lost" || owned.state === "adopted_lost";
@@ -102,7 +120,7 @@ export function registerLifecycleTools(server: any) {
         };
       }
 
-      const result = await execHcom(["stop", name]);
+      const result = await execHcom(["stop", canonicalName]);
       if (result.exitCode !== 0) {
         if ((result.stderr || result.stdout).toLowerCase().includes("not found")) {
           const lostState = owned.state.startsWith("adopted_") ? "adopted_lost" : "managed_lost";
@@ -146,7 +164,7 @@ export function registerLifecycleTools(server: any) {
       const validation = await validateStopKillTarget(name, "kill", sender_name, workspace);
       if (!validation.ok) return validation.response;
 
-      const { cwd, owned, liveAgent } = validation;
+      const { cwd, owned, liveAgent, canonicalName } = validation;
 
       const isLost = owned.state === "managed_lost" || owned.state === "adopted_lost";
       if (isLost && !liveAgent) {
@@ -159,7 +177,7 @@ export function registerLifecycleTools(server: any) {
         };
       }
 
-      const result = await execHcom(["kill", name, "--go"]);
+      const result = await execHcom(["kill", canonicalName, "--go"]);
       if (result.exitCode !== 0) {
         if ((result.stderr || result.stdout).toLowerCase().includes("not found")) {
           const lostState = owned.state.startsWith("adopted_") ? "adopted_lost" : "managed_lost";
