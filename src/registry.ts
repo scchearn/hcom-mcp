@@ -2,11 +2,12 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import {
+import { findLiveAgentByIdentifier, listHcomAgents, listStoppedAgentNames } from "./hcom.js";import {
   RegistryRecordSchema,
   type RegistryRecord,
   type OwnershipState,
   type Harness,
+  type HcomAgent,
 } from "./types.js";
 
 export const REGISTRY_DIR = join(homedir(), ".hcom", "mcp");
@@ -285,33 +286,158 @@ export function findRecordByWorkspaceAndName(
 }
 
 /**
+ * Match a record to a live hcom agent by its stored base name.
+ */
+export function matchLiveAgent(
+  record: Pick<RegistryRecord, "hcomName">,
+  hcomAgents: HcomAgent[]
+): HcomAgent | null {
+  if (!record.hcomName) {
+    return null;
+  }
+
+  return findLiveAgentByIdentifier(record.hcomName, hcomAgents);
+}
+
+/**
+ * Settle registry records against live hcom state. This is the single
+ * live-vs-record truth engine: it demotes never-live records to lost, promotes
+ * stopped/blocked records that are live again, and keeps cleanly-stopped
+ * records stopped. `stoppedNames` (from `hcom list --stopped`) lets a record
+ * that stopped cleanly stay stopped instead of being demoted to lost.
+ */
+export function reconcileManagedRecords(
+  records: RegistryRecord[],
+  hcomAgents: HcomAgent[],
+  stoppedNames: string[] = [],
+): RegistryRecord[] {
+  return records.map((record) => {
+    if (record.released || !record.hcomName) {
+      return record;
+    }
+
+    const liveAgent = matchLiveAgent(record, hcomAgents);
+
+    // Reverse reconcile stopped→active for both managed and adopted
+    if (
+      (record.state === "managed_stopped" || record.state === "adopted_stopped") &&
+      liveAgent
+    ) {
+      const newState = record.state === "managed_stopped" ? "managed_active" : "adopted_active";
+      return { ...record, state: newState as OwnershipState };
+    }
+
+    // Blocked records: the agent was alive but waiting on user attention or
+    // still launching. If it is live again, promote to active; if it is gone,
+    // demote to lost.
+    if (record.state === "managed_blocked") {
+      return { ...record, state: (liveAgent ? "managed_active" : "managed_lost") as OwnershipState };
+    }
+
+    // Stopped records: keep them stopped when the agent stopped cleanly
+    // (present in `hcom list --stopped`); demote to lost when it vanished
+    // without a clean stop.
+    if (record.state === "managed_stopped" || record.state === "adopted_stopped") {
+      if (stoppedNames.includes(record.hcomName)) return record;
+      const lostState = record.state === "managed_stopped" ? "managed_lost" : "adopted_lost";
+      return { ...record, state: lostState as OwnershipState };
+    }
+
+    // For managed_lost, skip further transitions (preserve existing behavior)
+    if (record.state === "managed_lost") {
+      return record;
+    }
+
+    // For adopted_lost, skip further transitions
+    if (record.state === "adopted_lost") {
+      return record;
+    }
+
+    // Managed active but not found live → managed_lost
+    if (record.state === "managed_active" && !liveAgent) {
+      return { ...record, state: "managed_lost" as const };
+    }
+
+    // Adopted active but not found live → adopted_lost
+    if (record.state === "adopted_active" && !liveAgent) {
+      return { ...record, state: "adopted_lost" as const };
+    }
+
+    return record;
+  });
+}
+
+/**
+ * Reconcile a workspace's records against live hcom state and persist any
+ * state transitions. Returns the reconciled records.
+ */
+export async function reconcileWorkspaceRecords(workspace: string): Promise<RegistryRecord[]> {
+  const records = getOwnedRecordsByWorkspace(workspace);
+  const [hcomAgents, stoppedNames] = await Promise.all([
+    listHcomAgents(),
+    listStoppedAgentNames(),
+  ]);
+  const reconciled = reconcileManagedRecords(records, hcomAgents, stoppedNames);
+  persistReconciledState(records, reconciled);
+  return reconciled;
+}
+
+export function persistReconciledState(before: RegistryRecord[], after: RegistryRecord[]) {
+  for (const [index, record] of after.entries()) {
+    if (record.state !== before[index]?.state) {
+      updateRecordState(record.id, record.state);
+    }
+  }
+}
+
+/**
  * Prune stale registry records based on state and age.
+ * Reconciles against live hcom state FIRST so never-live records are demoted
+ * to lost where the age rules can reach them (kills the phantom-active
+ * bucket), then applies the age rules.
  * Returns the list of records that would be (or were) removed.
  */
-export function pruneRecords(
+export async function pruneRecords(
   workspace: string,
   options: {
     olderThanDays?: number;
+    lostOlderThanDays?: number;
     includeStopped?: boolean;
     stoppedOlderThanDays?: number;
     confirm?: boolean;
+    allWorkspaces?: boolean;
   } = {},
-): { removed: RegistryRecord[]; wouldRemove: RegistryRecord[] } {
+): Promise<{ removed: RegistryRecord[]; wouldRemove: RegistryRecord[] }> {
   const {
-    olderThanDays = 7,
+    // lostOlderThanDays is the canonical name; olderThanDays is kept as a
+    // deprecated alias for one release (mapped, not dropped).
+    lostOlderThanDays = options.olderThanDays ?? 7,
     includeStopped = false,
     stoppedOlderThanDays = 30,
     confirm = false,
+    allWorkspaces = false,
   } = options;
 
+  // Reconcile first: demote never-live records to lost so the age rules below
+  // can reach them. Without this, phantom managed_active records are invisible
+  // to prune forever.
+  const [hcomAgents, stoppedNames] = await Promise.all([
+    listHcomAgents(),
+    listStoppedAgentNames(),
+  ]);
   const registry = loadRegistry();
+  const reconciled = reconcileManagedRecords(registry.records, hcomAgents, stoppedNames);
+  persistReconciledState(registry.records, reconciled);
+
   const now = Date.now();
 
   const lostStates: OwnershipState[] = ["managed_lost", "adopted_lost"];
   const stoppedStates: OwnershipState[] = ["managed_stopped", "adopted_stopped"];
   const protectedStates: OwnershipState[] = ["managed_active", "adopted_active", "managed_released", "managed_blocked"];
 
-  const workspaceRecords = registry.records.filter((r) => r.workspace === workspace);
+  const workspaceRecords = allWorkspaces
+    ? reconciled
+    : reconciled.filter((r) => r.workspace === workspace);
 
   function isOlderThan(record: RegistryRecord, days: number): boolean {
     const lastSeen = new Date(record.lastSeenAt).getTime();
@@ -324,7 +450,7 @@ export function pruneRecords(
     // Never prune active/released/blocked records
     if (protectedStates.includes(record.state)) continue;
 
-    if (lostStates.includes(record.state) && isOlderThan(record, olderThanDays)) {
+    if (lostStates.includes(record.state) && isOlderThan(record, lostOlderThanDays)) {
       toRemove.push(record);
     } else if (includeStopped && stoppedStates.includes(record.state) && isOlderThan(record, stoppedOlderThanDays)) {
       toRemove.push(record);
