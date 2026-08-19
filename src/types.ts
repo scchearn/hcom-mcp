@@ -157,6 +157,7 @@ export const RegistryRecordSchema = z.object({
   harness: HarnessEnum,
   hcomName: z.string().optional(),
   sessionId: z.string().optional(),
+  batchId: z.string().optional(),
   preset: z.string().optional(),
   topology: z.string().optional(),
   topologyRole: z.string().optional(),

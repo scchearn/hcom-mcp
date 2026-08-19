@@ -4,7 +4,7 @@ import type { ExecOptions, ModelDiscoveryResult } from "../hcom.js";
 import { loadMergedConfig, resolveAgentPreset, resolveTopologyPreset, validateTopologyReferences } from "../config.js";
 import { addRecord, removeRecords } from "../registry.js";
 import { HARNESS_COMMAND, HarnessEnum } from "../types.js";
-import type { AgentPreset, Harness } from "../types.js";
+import type { AgentPreset, Harness, OwnershipState } from "../types.js";
 
 type ModelCatalogCache = Map<Harness, ModelDiscoveryResult>;
 
@@ -28,6 +28,9 @@ type LaunchResult = {
   registryId: string;
   registryIds: string[];
   command: string;
+  // Present only when hcom exited 2 (agent alive but blocked / still launching).
+  blocked?: boolean;
+  reason?: string;
 };
 
 function defaultPromptForHarness(harness: Harness): string | undefined {
@@ -480,38 +483,83 @@ async function launchAgent(
 
   const result = await execHcom(args, execOptions);
 
-  if (result.exitCode !== 0) {
-    throw new Error(`hcom launch failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`);
-  }
-
-  // Parse output for agent names
-  // Output format: "Names: aaaa bbbb ..." and "Batch id: xxxxx"
+  // Parse output for agent names. hcom prints "Names: aaaa bbbb ..." and
+  // "Batch id: xxxxx" on stdout for both success and non-zero exits.
   const namesMatch = result.stdout.match(/Names:\s+(.+)/);
   const batchMatch = result.stdout.match(/Batch id:\s+(\S+)/);
   const hcomNames = namesMatch ? namesMatch[1].trim().split(/\s+/) : [];
   const batchId = batchMatch ? batchMatch[1] : null;
 
-  // Record ownership for every launched worker name.
-  const trackedNames = hcomNames.length > 0 ? hcomNames : [undefined];
-  const records = trackedNames.map((hcomName) =>
+  // No names parsed: nothing was spawned. Never record a nameless record —
+  // that was the old "managed_active fiction" that could not be matched to a
+  // live agent anyway.
+  if (hcomNames.length === 0) {
+    throw new Error(`hcom launch failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`);
+  }
+
+  // Record ownership BEFORE branching on the exit code: hcom's exit contract is
+  // 0 = ready, 1 = spawn error / launch_failed, 2 = still launching or blocked
+  // on user attention (agent alive). A live-but-blocked agent must never be
+  // left invisible to kill/stop/list_managed/prune.
+  const records = hcomNames.map((hcomName) =>
     addRecord({
       workspace,
       harness: preset.harness,
       hcomName,
+      batchId: batchId ?? undefined,
       preset: preset.name,
       launchMode: preset.headless !== false ? "headless" : "headed",
-      state: "managed_active",
+      state: classifyLaunchState(result.exitCode),
       released: false,
       launchedBy,
     })
   );
 
-  return {
-    presetName: preset.name,
-    hcomNames,
-    batchId,
-    registryId: records[0].id,
-    registryIds: records.map((record) => record.id),
-    command: `hcom ${args.join(" ")}`,
-  };
+  if (result.exitCode === 0) {
+    return {
+      presetName: preset.name,
+      hcomNames,
+      batchId,
+      registryId: records[0].id,
+      registryIds: records.map((record) => record.id),
+      command: `hcom ${args.join(" ")}`,
+    };
+  }
+
+  if (result.exitCode === 2) {
+    // Agent is alive but still launching or blocked on user attention.
+    // Not an error: the caller can watch it via hcom term <name>.
+    return {
+      presetName: preset.name,
+      hcomNames,
+      batchId,
+      registryId: records[0].id,
+      registryIds: records.map((record) => record.id),
+      command: `hcom ${args.join(" ")}`,
+      blocked: true,
+      reason: `hcom launch exited ${result.exitCode}: agent(s) still launching or blocked on user attention. ` +
+        `Recorded as managed_blocked. Inspect with hcom term ${hcomNames.join(" ")}, then retry or stop.`,
+    };
+  }
+
+  // Exit 1 (or any other non-zero) with names parsed: the spawn failed but
+  // something was created. Kill the corpse so it cannot linger, then throw.
+  for (const name of hcomNames) {
+    await execHcom(["kill", name, "--go"]);
+  }
+  throw new Error(
+    `hcom launch failed (exit ${result.exitCode}): ${result.stderr || result.stdout}. ` +
+      `Recorded as managed_lost and killed: ${hcomNames.join(", ")}.`
+  );
+}
+
+/**
+ * Map an hcom launch exit code to the ownership state recorded before the
+ * outcome branch. 0 = ready, 2 = alive but blocked/still launching, anything
+ * else with names parsed = spawn failure (corpse to be killed).
+ */
+function classifyLaunchState(exitCode: number): OwnershipState {
+  if (exitCode === 0) return "managed_active";
+  if (exitCode === 2) return "managed_blocked";
+  return "managed_lost";
 }
