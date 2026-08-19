@@ -15,6 +15,7 @@ import {
   reconcileWorkspaceRecords,
 } from "../registry.js";
 import type { HcomAgent, RegistryRecord } from "../types.js";
+import { E_INTERNAL, internalError } from "../errors.js";
 
 export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgent[]) {
   const liveAgent = matchLiveAgent(record, hcomAgents);
@@ -47,7 +48,7 @@ export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgen
 export function registerListManagedTool(server: any) {
   server.tool(
     "list_managed",
-    "List all hcom agents managed by this MCP server in the current workspace",
+    "List all hcom agents managed by this MCP server in the current workspace. Returns { managed, total } where each record is enriched with managementType (managed/adopted), liveFound, liveName, liveBaseName, liveStatus, liveDescription, liveTool, liveTag. Read-only; no sender identity required. Related: list_all (all live agents), status (counts + health).",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
@@ -69,10 +70,7 @@ export function registerListManagedTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );
@@ -81,7 +79,7 @@ export function registerListManagedTool(server: any) {
 export function registerListAllTool(server: any) {
   server.tool(
     "list_all",
-    "List all live hcom agents visible to the local hcom CLI",
+    "List all live hcom agents visible to the local hcom CLI. Returns { agents, total } where each agent carries managementStatus (managed/adopted/unmanaged) resolved against the requested workspace. Read-only; no sender identity required. Related: list_managed (owned records only), inspect (per-agent detail).",
     {
       workspace: z.string().optional().describe("Workspace path for ownership resolution. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so managementStatus matches the workspace you query with list_managed."),
     },
@@ -120,10 +118,7 @@ export function registerListAllTool(server: any) {
           }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );
@@ -132,24 +127,22 @@ export function registerListAllTool(server: any) {
 export function registerListPresetsTool(server: any) {
   server.tool(
     "list_presets",
-    "List merged agent presets available to this server in the current workspace",
+    "List merged agent presets available to this server in the current workspace. Returns { presets, total }; each preset carries name, supportedHarnesses, modelsByHarness, headless, pty, tag, ttlMinutes, hasDir, hasPrompt, hasSystemPrompt, and promptPreview (first 120 chars of the prompt) when prompt_preview=true. Read-only; no sender identity required. Related: launch (consumes presets), list_topologies.",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
+      prompt_preview: z.boolean().optional().describe("Include a promptPreview (first 120 chars) per preset (default: false)"),
     },
-    async ({ workspace }: { workspace?: string }) => {
+    async ({ workspace, prompt_preview }: { workspace?: string; prompt_preview?: boolean }) => {
       const cwd = workspace ?? process.cwd();
 
       try {
         const config = loadMergedConfig(cwd);
-        const presets = summarizeAgentPresets(config.agentPresets);
+        const presets = summarizeAgentPresets(config.agentPresets, prompt_preview ?? false);
         return {
           content: [{ type: "text" as const, text: JSON.stringify({ presets, total: presets.length }, null, 2) }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );
@@ -158,7 +151,7 @@ export function registerListPresetsTool(server: any) {
 export function registerListTopologiesTool(server: any) {
   server.tool(
     "list_topologies",
-    "List merged topology presets available to this server in the current workspace",
+    "List merged topology presets available to this server in the current workspace. Returns { topologies, total }; each topology carries name, roleCount, roles (role/preset/harness/count), hub, threadPrefix, missingPresets. Read-only; no sender identity required. Related: launch_topology (consumes topologies), list_presets.",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
@@ -172,35 +165,7 @@ export function registerListTopologiesTool(server: any) {
           content: [{ type: "text" as const, text: JSON.stringify({ topologies, total: topologies.length }, null, 2) }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
-      }
-    }
-  );
-}
-
-export function registerConfigPathsTool(server: any) {
-  server.tool(
-    "config_paths",
-    "Show the config and registry paths used by this server",
-    {
-      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
-    },
-    async ({ workspace }: { workspace?: string }) => {
-      const cwd = workspace ?? process.cwd();
-
-      try {
-        const paths = getConfigPaths(cwd);
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(paths, null, 2) }],
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );
@@ -209,7 +174,7 @@ export function registerConfigPathsTool(server: any) {
 export function registerStatusTool(server: any) {
   server.tool(
     "status",
-    "Show a quick health and orientation summary for hcom-mcp, including the hcom CLI installation health (hooks/install breakage is invisible until launches die, so it is surfaced here).",
+    "Show a quick health and orientation summary for hcom-mcp, including the hcom CLI installation health (hooks/install breakage is invisible until launches die, so it is surfaced here). Returns { hcomAvailable, hcomVersion, hcomHealth, workspace, paths, agentPresetCount, topologyPresetCount, liveAgentCount, managedRecordCount, stateBreakdown, managedLostCount, managedReleasedCount }. Read-only; no sender identity required. Related: list_managed, list_all, list_presets.",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
@@ -253,10 +218,7 @@ export function registerStatusTool(server: any) {
           content: [{ type: "text" as const, text: JSON.stringify(summary, null, 2) }],
         };
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     }
   );

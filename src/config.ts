@@ -223,7 +223,8 @@ export function getConfigPaths(cwd: string) {
 }
 
 export function summarizeAgentPresets(
-  presets: MergedConfig["agentPresets"]
+  presets: MergedConfig["agentPresets"],
+  promptPreview: boolean = false
 ) {
   return Object.values(presets)
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -244,6 +245,11 @@ export function summarizeAgentPresets(
       hasDir: Boolean(preset.dir),
       hasPrompt: Boolean(preset.prompt),
       hasSystemPrompt: Boolean(preset.systemPrompt),
+      // Opt-in prompt preview: prompts can be long system instructions, so
+      // only the head is exposed and only when asked.
+      ...(promptPreview && preset.prompt
+        ? { promptPreview: preset.prompt.slice(0, 120) }
+        : {}),
     }));
 }
 
