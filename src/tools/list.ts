@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { execHcom, findLiveAgentByIdentifier, listHcomAgents } from "../hcom.js";
+import { execHcom, findLiveAgentByIdentifier, listHcomAgents, parseHcomJson } from "../hcom.js";
 import {
   getConfigPaths,
   loadMergedConfig,
@@ -209,7 +209,7 @@ export function registerConfigPathsTool(server: any) {
 export function registerStatusTool(server: any) {
   server.tool(
     "status",
-    "Show a quick health and orientation summary for hcom-mcp",
+    "Show a quick health and orientation summary for hcom-mcp, including the hcom CLI installation health (hooks/install breakage is invisible until launches die, so it is surfaced here).",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
@@ -235,6 +235,9 @@ export function registerStatusTool(server: any) {
         const summary = {
           hcomAvailable: true,
           hcomVersion: await getHcomVersion(),
+          // #11.6: fold `hcom status --json` in so hook/install breakage is
+          // visible before it eats a launch. Cached like the version check.
+          hcomHealth: await getHcomHealth(),
           workspace: cwd,
           paths,
           agentPresetCount: Object.keys(config.agentPresets).length,
@@ -272,4 +275,24 @@ async function getHcomVersion(): Promise<string | null> {
   const result = await execHcom(["--version"]);
   cachedHcomVersion = result.exitCode === 0 ? (result.stdout || null) : null;
   return cachedHcomVersion;
+}
+
+/**
+ * Read `hcom status --json` for installation health (hooks, tools, relay,
+ * config validity). Returns null when the CLI fails, so status stays
+ * informative instead of hard-coding health. Cached once per process like
+ * the version check: installation state changes rarely within a session.
+ */
+let cachedHcomHealth: Record<string, unknown> | null | undefined;
+
+async function getHcomHealth(): Promise<Record<string, unknown> | null> {
+  if (cachedHcomHealth !== undefined) return cachedHcomHealth;
+  const result = await execHcom(["status", "--json"]);
+  if (result.exitCode !== 0) {
+    cachedHcomHealth = null;
+    return null;
+  }
+  const parsed = parseHcomJson<Record<string, unknown>>(result.stdout);
+  cachedHcomHealth = parsed ?? null;
+  return cachedHcomHealth;
 }

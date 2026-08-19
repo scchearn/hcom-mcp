@@ -2,7 +2,21 @@ import { z } from "zod";
 
 // --- Harness types ---
 
-export const HarnessEnum = z.enum(["claude", "opencode", "codex", "antigravity"]);
+// All 11 harnesses hcom supports. Every entry must have a working
+// HARNESS_COMMAND and HARNESS_ENV_ARGS mapping below.
+export const HarnessEnum = z.enum([
+  "claude",
+  "opencode",
+  "codex",
+  "antigravity",
+  "gemini",
+  "kilo",
+  "pi",
+  "omp",
+  "cursor",
+  "kimi",
+  "copilot",
+]);
 export type Harness = z.infer<typeof HarnessEnum>;
 
 // Maps harness name to hcom CLI subcommand
@@ -11,6 +25,13 @@ export const HARNESS_COMMAND: Record<Harness, string> = {
   opencode: "opencode",
   codex: "codex",
   antigravity: "agy",
+  gemini: "gemini",
+  kilo: "kilo",
+  pi: "pi",
+  omp: "omp",
+  cursor: "cursor-agent",
+  kimi: "kimi",
+  copilot: "copilot",
 };
 
 // Maps harness name to the environment variable for default model args
@@ -20,6 +41,13 @@ export const HARNESS_ENV_ARGS: Record<Harness, string> = {
   codex: "HCOM_CODEX_ARGS",
   // ponytail: antigravity has no HCOM_*_ARGS env today; placeholder keeps the Record total
   antigravity: "HCOM_ANTIGRAVITY_ARGS",
+  gemini: "HCOM_GEMINI_ARGS",
+  kilo: "HCOM_KILO_ARGS",
+  pi: "HCOM_PI_ARGS",
+  omp: "HCOM_OMP_ARGS",
+  cursor: "HCOM_CURSOR_ARGS",
+  kimi: "HCOM_KIMI_ARGS",
+  copilot: "HCOM_COPILOT_ARGS",
 };
 
 // --- Launch modes ---
@@ -57,6 +85,13 @@ export const AgentPresetHarnessMapSchema = z
     opencode: HarnessVariantSchema.optional(),
     codex: HarnessVariantSchema.optional(),
     antigravity: HarnessVariantSchema.optional(),
+    gemini: HarnessVariantSchema.optional(),
+    kilo: HarnessVariantSchema.optional(),
+    pi: HarnessVariantSchema.optional(),
+    omp: HarnessVariantSchema.optional(),
+    cursor: HarnessVariantSchema.optional(),
+    kimi: HarnessVariantSchema.optional(),
+    copilot: HarnessVariantSchema.optional(),
   })
   .refine((value) => Object.values(value).some(Boolean), {
     message: "At least one harness variant is required",
@@ -205,6 +240,9 @@ export const RegistryRecordSchema = z.object({
   // Set at launch from ttlMinutes (preset or tool param); reconcile flags
   // expired records and prune expired=true kills + clears them.
   expiresAt: z.string().optional(),
+  // Handoff provenance: set on records created by resume/fork, linking the
+  // new record to the source agent's record id (resume) or name (fork).
+  resumedFrom: z.string().optional(),
 });
 export type RegistryRecord = z.infer<typeof RegistryRecordSchema>;
 
@@ -214,6 +252,7 @@ export const HcomAgentSchema = z.object({
   name: z.string(),
   base_name: z.string(),
   status: z.string(),
+  status_age_seconds: z.number().optional(),
   status_context: z.string().optional(),
   status_detail: z.string().optional(),
   description: z.string().optional(),

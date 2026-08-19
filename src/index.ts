@@ -20,6 +20,9 @@ import { registerLifecycleTools } from "./tools/lifecycle.js";
 import { registerThreadSeedTool, registerThreadInspectTool } from "./tools/threads.js";
 import { registerAdoptTool } from "./tools/adopt.js";
 import { registerUnblockTool } from "./tools/unblock.js";
+import { registerWatchAgentsTool } from "./tools/watch.js";
+import { registerResumeForkTools } from "./tools/resume_fork.js";
+import { registerSendTool } from "./tools/send.js";
 import { isHcomAvailable } from "./hcom.js";
 
 const PORT = parseInt(process.env.HCOM_MCP_PORT ?? "3111", 10);
@@ -46,6 +49,9 @@ function createHcomMcpServer(): McpServer {
   registerThreadInspectTool(s);
   registerAdoptTool(s);
   registerUnblockTool(s);
+  registerWatchAgentsTool(s);
+  registerResumeForkTools(s);
+  registerSendTool(s);
   return s;
 }
 

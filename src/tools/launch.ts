@@ -33,6 +33,8 @@ type LaunchResult = {
   // Present only when hcom exited 2 (agent alive but blocked / still launching).
   blocked?: boolean;
   reason?: string;
+  // Present when a claude model was passed through unverified (see #16).
+  modelNote?: string;
 };
 
 export type { LaunchResult };
@@ -90,6 +92,30 @@ function matchesConfiguredModel(
   return false;
 }
 
+/**
+ * True when a model string looks like a claude model identifier (alias or
+ * full ID). Aliases are the bundled catalog; full IDs are `claude-*` strings
+ * (dated variants like claude-opus-4-8, context suffixes like -1m, or
+ * provider-qualified forms). Anything else cannot be a claude model and is
+ * rejected by validatePresetModelAvailability.
+ */
+export function isClaudeModelIdentifier(model: string): boolean {
+  return model === "opus" || model === "sonnet" || model === "haiku" || /^claude-/.test(model);
+}
+
+/**
+ * Note attached to launch results when a claude model was passed through
+ * unverified (not in the bundled alias catalog). The claude CLI is the
+ * authority on what it accepts; the MCP warns instead of rejecting.
+ */
+export function claudeModelNote(model: string): string | undefined {
+  if (model === "opus" || model === "sonnet" || model === "haiku") return undefined;
+  if (/^claude-/.test(model)) {
+    return `Model "${model}" was not verified against the bundled claude catalog and was passed through to the claude CLI unverified.`;
+  }
+  return undefined;
+}
+
 export async function validatePresetModelAvailability(
   preset: Pick<ResolvedLaunchPreset, "name" | "harness" | "model">,
   catalogCache: ModelCatalogCache = new Map()
@@ -105,6 +131,14 @@ export async function validatePresetModelAvailability(
   }
 
   if (!matchesConfiguredModel(preset, catalog)) {
+    // #16: the claude CLI accepts full model IDs (claude-opus-4-8, dated
+    // variants, -1m suffixes) as well as the bundled aliases. Strings that
+    // look like claude identifiers pass through unverified — the CLI is the
+    // authority and fails fast and readably on bogus models. Hard-fail only
+    // for strings that cannot be claude identifiers.
+    if (preset.harness === "claude" && isClaudeModelIdentifier(preset.model)) {
+      return null;
+    }
     return `Configured model "${preset.model}" for preset "${preset.name}" was not found in the ${catalog.status} ${preset.harness} model catalog. Use list_models to inspect available models.`;
   }
 
@@ -119,7 +153,7 @@ export function registerLaunchTool(server: any) {
     "launch",
     "Launch a headless hcom agent. Use a preset name for configured defaults, or provide harness+model directly for a bare launch. Preset defaults (model, tag, prompt) can be overridden with explicit parameters.",
     {
-      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity)"),
+      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity, gemini, kilo, pi, omp, cursor, kimi, copilot)"),
       preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
       model: z.string().optional().describe("Model name override or standalone model for bare launches"),
       prompt: z.string().optional().describe("Initial prompt for the agent"),
@@ -423,6 +457,10 @@ export async function launchAgent(
   if (validationError) {
     throw new Error(validationError);
   }
+  // #16: claude full model IDs pass through unverified; surface a note on the
+  // launch result so the caller knows the model was not catalog-verified.
+  const modelNote =
+    preset.harness === "claude" ? claudeModelNote(preset.model) : undefined;
 
   const args: string[] = [];
 
@@ -560,6 +598,7 @@ export async function launchAgent(
       registryId: records[0].id,
       registryIds: records.map((record) => record.id),
       command: `hcom ${args.join(" ")}`,
+      ...(modelNote ? { modelNote } : {}),
     };
   }
 
@@ -576,6 +615,7 @@ export async function launchAgent(
       blocked: true,
       reason: `hcom launch exited ${result.exitCode}: agent(s) still launching or blocked on user attention. ` +
         `Recorded as managed_blocked. Inspect with hcom term ${hcomNames.join(" ")}, then retry or stop.`,
+      ...(modelNote ? { modelNote } : {}),
     };
   }
 
@@ -773,7 +813,7 @@ export function registerSpawnAndVerifyTool(server: any) {
     "spawn_and_verify",
     "Launch an agent and gate on readiness. Reuses the launch path unchanged; waits for the batch to reach a terminal state (one hcom events launch call, not a polling loop). Classifies ready / failed / timeout / blocked. With on_blocked=rescue, iterates allowlist-guarded rescue gates until ready. Persists outcome + latencyMs + reason on the registry record.",
     {
-      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity)"),
+      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity, gemini, kilo, pi, omp, cursor, kimi, copilot)"),
       preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
       model: z.string().optional().describe("Model name override or standalone model for bare launches"),
       prompt: z.string().optional().describe("Initial prompt for the agent"),
