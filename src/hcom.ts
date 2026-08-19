@@ -9,6 +9,12 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /**
+   * True when the child was killed by the Node-level timeout (or another
+   * parent-initiated kill) rather than exiting on its own. exitCode is -1 in
+   * that case so a timeout can never be confused with a spawn failure.
+   */
+  timedOut?: boolean;
 }
 
 export interface ExecOptions {
@@ -16,6 +22,10 @@ export interface ExecOptions {
   // Extra env vars merged on top of process.env before exec. Useful for injecting
   // env vars that hcom does not overwrite (e.g. OPENCODE_CONFIG_CONTENT).
   env?: Record<string, string>;
+  // Per-call exec timeout in ms. Defaults to 30s. Blocking-gate callers
+  // (hcom events --wait, launch readiness waits) should pass gate_timeout + ~10s
+  // slack so the CLI's own timeout fires first.
+  timeoutMs?: number;
 }
 
 /**
@@ -29,16 +39,28 @@ export async function execCommand(
   try {
     const { stdout, stderr } = await execFileAsync(command, args, {
       maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
+      timeout: options.timeoutMs ?? 30_000,
       ...(options.cwd ? { cwd: options.cwd } : {}),
       ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
     });
     return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode: 0 };
   } catch (err: any) {
+    // A Node-level timeout kills the child before it can exit on its own.
+    // Distinguish that from a real spawn/exit failure so callers never mistake
+    // a killed long-running command for a failed one.
+    if (err.killed === true) {
+      return {
+        stdout: (err.stdout || "").toString().trim(),
+        stderr: (err.stderr || "").toString().trim(),
+        exitCode: -1,
+        timedOut: true,
+      };
+    }
     return {
       stdout: (err.stdout || "").toString().trim(),
       stderr: (err.stderr || "").toString().trim(),
-      exitCode: err.code ?? 1,
+      // err.code is a number for real exit codes; ENOENT and friends are strings.
+      exitCode: typeof err.code === "number" ? err.code : 1,
     };
   }
 }
