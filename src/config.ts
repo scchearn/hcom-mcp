@@ -41,6 +41,7 @@ function normalizeAgentPreset(preset: AgentPresetInput): AgentPreset {
       dir: preset.dir,
       prompt: preset.prompt,
       systemPrompt: preset.systemPrompt,
+      ttlMinutes: preset.ttlMinutes,
     });
   }
 

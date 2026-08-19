@@ -9,7 +9,7 @@ export function registerPruneTool(server: any) {
     {
       workspace: z.string().optional().describe("Workspace path (defaults to the server's working directory; pass explicitly when the server runs under a service manager so records are scoped to the workspace you query with list_managed). Ignored when allWorkspaces=true."),
       olderThanDays: z.number().optional().describe("DEPRECATED alias for lostOlderThanDays (kept for one release; use lostOlderThanDays)"),
-      lostOlderThanDays: z.number().default(7).describe("Minimum age in days for lost records to be pruned"),
+      lostOlderThanDays: z.number().optional().describe("Minimum age in days for lost records to be pruned (default: 7)"),
       includeStopped: z.boolean().default(false).describe("Also target stopped records (managed_stopped, adopted_stopped)"),
       stoppedOlderThanDays: z.number().default(30).describe("Minimum age in days for stopped records to be pruned"),
       confirm: z.boolean().default(false).describe("Set to true to actually remove records (default is dry-run)"),
@@ -29,7 +29,7 @@ export function registerPruneTool(server: any) {
       verbose,
     }: {
       workspace?: string;
-      lostOlderThanDays: number;
+      lostOlderThanDays?: number;
       olderThanDays?: number;
       includeStopped: boolean;
       stoppedOlderThanDays: number;
@@ -41,10 +41,15 @@ export function registerPruneTool(server: any) {
       const cwd = workspace ?? process.cwd();
 
       try {
+        // The canonical name wins; the deprecated alias is a fallback. Both
+        // are zod-optional so the registry-level default (7) applies when
+        // neither is passed.
+        const effectiveLostOlderThanDays = lostOlderThanDays ?? olderThanDays;
+
         // Expired mode kills the agents before clearing their records.
         if (expired && confirm) {
           const result = await pruneRecords(cwd, {
-            lostOlderThanDays,
+            lostOlderThanDays: effectiveLostOlderThanDays,
             includeStopped,
             stoppedOlderThanDays,
             confirm: false,
@@ -54,11 +59,29 @@ export function registerPruneTool(server: any) {
           const killTargets = result.wouldRemove
             .filter((r) => r.hcomName)
             .map((r) => r.hcomName!);
+          const failedKills: string[] = [];
           for (const name of killTargets) {
-            await execHcom(["kill", name, "--go"]);
+            const kill = await execHcom(["kill", name, "--go"]);
+            const msg = (kill.stderr || kill.stdout).toLowerCase();
+            // "not found" means the agent already exited on its own — safe to
+            // clear. Any other failure leaves the agent alive, so its record
+            // must NOT be cleared (no orphaned live agents).
+            if (kill.exitCode !== 0 && !msg.includes("not found")) {
+              failedKills.push(name);
+            }
+          }
+          if (failedKills.length > 0) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Error: failed to kill ${failedKills.join(", ")} before clearing records. ` +
+                  `No records were removed; retry after confirming the agents are gone.`,
+              }],
+              isError: true,
+            };
           }
           const confirmed = await pruneRecords(cwd, {
-            lostOlderThanDays,
+            lostOlderThanDays: effectiveLostOlderThanDays,
             includeStopped,
             stoppedOlderThanDays,
             confirm: true,
@@ -71,8 +94,7 @@ export function registerPruneTool(server: any) {
         }
 
         const result = await pruneRecords(cwd, {
-          lostOlderThanDays,
-          olderThanDays,
+          lostOlderThanDays: effectiveLostOlderThanDays,
           includeStopped,
           stoppedOlderThanDays,
           confirm,
