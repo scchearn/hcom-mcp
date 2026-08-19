@@ -149,11 +149,13 @@ export function registerListAllTool(server: any) {
   server.tool(
     "list_all",
     "List all live hcom agents visible to the local hcom CLI",
-    {},
-    async () => {
+    {
+      workspace: z.string().optional().describe("Workspace path for ownership resolution. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so managementStatus matches the workspace you query with list_managed."),
+    },
+    async ({ workspace }: { workspace?: string }) => {
       try {
         const agents = await listHcomAgents();
-        const cwd = process.cwd();
+        const cwd = workspace ?? process.cwd();
         const records = getOwnedRecordsByWorkspace(cwd);
 
         const agentsWithStatus = agents.map((agent) => {
