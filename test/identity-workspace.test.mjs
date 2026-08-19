@@ -369,6 +369,7 @@ test('list_all accepts a workspace param and resolves records against it', async
       listHcomAgents: async () => LIVE_AGENTS,
       findLiveAgentByIdentifier: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id) ?? null,
+      execHcom: async () => ({ exitCode: 0, stdout: 'hcom 0.0.0', stderr: '' }),
     },
   });
   t.mock.module('../dist/registry.js', {
@@ -380,6 +381,10 @@ test('list_all accepts a workspace param and resolves records against it', async
       },
       getRecordsByWorkspace: () => [],
       updateRecordState: () => null,
+      matchLiveAgent: () => null,
+      persistReconciledState: () => {},
+      reconcileManagedRecords: (records) => records,
+      reconcileWorkspaceRecords: async () => [],
     },
   });
 

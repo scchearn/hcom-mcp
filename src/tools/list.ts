@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { findLiveAgentByIdentifier, listHcomAgents } from "../hcom.js";
+import { execHcom, findLiveAgentByIdentifier, listHcomAgents } from "../hcom.js";
 import {
   getConfigPaths,
   loadMergedConfig,
@@ -9,81 +9,14 @@ import {
 import {
   getOwnedRecordsByWorkspace,
   getRecordsByWorkspace,
-  updateRecordState,
+  matchLiveAgent,
+  persistReconciledState,
+  reconcileManagedRecords,
+  reconcileWorkspaceRecords,
 } from "../registry.js";
-import type { HcomAgent, OwnershipState, RegistryRecord } from "../types.js";
+import type { HcomAgent, RegistryRecord } from "../types.js";
 
-export function matchLiveAgent(
-  record: Pick<RegistryRecord, "hcomName">,
-  hcomAgents: HcomAgent[]
-): HcomAgent | null {
-  if (!record.hcomName) {
-    return null;
-  }
-
-  return findLiveAgentByIdentifier(record.hcomName, hcomAgents);
-}
-
-export function reconcileManagedRecords(
-  records: RegistryRecord[],
-  hcomAgents: HcomAgent[]
-): RegistryRecord[] {
-  return records.map((record) => {
-    if (record.released || !record.hcomName) {
-      return record;
-    }
-
-    const liveAgent = matchLiveAgent(record, hcomAgents);
-
-    // Reverse reconcile stopped→active for both managed and adopted
-    if (
-      (record.state === "managed_stopped" || record.state === "adopted_stopped") &&
-      liveAgent
-    ) {
-      const newState = record.state === "managed_stopped" ? "managed_active" : "adopted_active";
-      return { ...record, state: newState as OwnershipState };
-    }
-
-    // Blocked records: the agent was alive but waiting on user attention or
-    // still launching. If it is live again, promote to active; if it is gone,
-    // demote to lost.
-    if (record.state === "managed_blocked") {
-      return { ...record, state: (liveAgent ? "managed_active" : "managed_lost") as OwnershipState };
-    }
-
-    // For managed_lost, skip further transitions (preserve existing behavior)
-    if (record.state === "managed_lost") {
-      return record;
-    }
-
-    // For adopted_lost, skip further transitions
-    if (record.state === "adopted_lost") {
-      return record;
-    }
-
-    // Managed active but not found live → managed_lost
-    if (record.state === "managed_active" && !liveAgent) {
-      return { ...record, state: "managed_lost" as const };
-    }
-
-    // Adopted active but not found live → adopted_lost
-    if (record.state === "adopted_active" && !liveAgent) {
-      return { ...record, state: "adopted_lost" as const };
-    }
-
-    return record;
-  });
-}
-
-function persistReconciledState(before: RegistryRecord[], after: RegistryRecord[]) {
-  for (const [index, record] of after.entries()) {
-    if (record.state !== before[index]?.state) {
-      updateRecordState(record.id, record.state);
-    }
-  }
-}
-
-function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgent[]) {
+export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgent[]) {
   const liveAgent = matchLiveAgent(record, hcomAgents);
 
   let managementType: string;
@@ -122,8 +55,8 @@ export function registerListManagedTool(server: any) {
       const cwd = workspace ?? process.cwd();
 
       try {
-        const records = getOwnedRecordsByWorkspace(cwd);
         const hcomAgents = await listHcomAgents();
+        const records = getOwnedRecordsByWorkspace(cwd);
         const reconciled = reconcileManagedRecords(records, hcomAgents);
         persistReconciledState(records, reconciled);
 
@@ -288,18 +221,27 @@ export function registerStatusTool(server: any) {
         const paths = getConfigPaths(cwd);
         const liveAgents = await listHcomAgents();
         const workspaceRecords = getRecordsByWorkspace(cwd);
-        const ownedRecords = getOwnedRecordsByWorkspace(cwd);
-        const reconciled = reconcileManagedRecords(ownedRecords, liveAgents);
-        persistReconciledState(ownedRecords, reconciled);
+        const reconciled = await reconcileWorkspaceRecords(cwd);
+
+        // Full state breakdown across every ownership state, including the
+        // stale buckets (adopted_lost is the largest in the wild and was
+        // invisible before). Built from the RECONCILED records so the
+        // breakdown and the derived counts never disagree.
+        const stateBreakdown: Record<string, number> = {};
+        for (const record of reconciled) {
+          stateBreakdown[record.state] = (stateBreakdown[record.state] ?? 0) + 1;
+        }
 
         const summary = {
           hcomAvailable: true,
+          hcomVersion: await getHcomVersion(),
           workspace: cwd,
           paths,
           agentPresetCount: Object.keys(config.agentPresets).length,
           topologyPresetCount: Object.keys(config.topologyPresets).length,
           liveAgentCount: liveAgents.length,
           managedRecordCount: reconciled.length,
+          stateBreakdown,
           managedLostCount: reconciled.filter((record) => record.state === "managed_lost").length,
           managedReleasedCount: workspaceRecords.filter((record) => record.released).length,
         };
@@ -315,4 +257,19 @@ export function registerStatusTool(server: any) {
       }
     }
   );
+}
+
+/**
+ * Read the hcom CLI version via `hcom --version`. Returns null when the CLI
+ * is missing or fails, so status stays informative instead of hard-coding
+ * availability. Cached once per process: the version rarely changes within a
+ * session and status is polled.
+ */
+let cachedHcomVersion: string | null | undefined;
+
+async function getHcomVersion(): Promise<string | null> {
+  if (cachedHcomVersion !== undefined) return cachedHcomVersion;
+  const result = await execHcom(["--version"]);
+  cachedHcomVersion = result.exitCode === 0 ? (result.stdout || null) : null;
+  return cachedHcomVersion;
 }

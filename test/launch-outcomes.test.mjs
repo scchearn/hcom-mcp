@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerLaunchTool } from '../dist/tools/launch.js';
-import { reconcileManagedRecords } from '../dist/tools/list.js';
+import { reconcileManagedRecords } from '../dist/registry.js';
 
 let importCounter = 0;
 

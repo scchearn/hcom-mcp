@@ -35,9 +35,11 @@ export const OwnershipStateEnum = z.enum([
   "managed_blocked",
   "managed_released",
   "managed_lost",
+  "managed_expired",
   "adopted_active",
   "adopted_stopped",
   "adopted_lost",
+  "adopted_expired",
 ]);
 export type OwnershipState = z.infer<typeof OwnershipStateEnum>;
 
@@ -69,6 +71,10 @@ export const AgentPresetSharedSchema = z.object({
   dir: z.string().optional(),
   prompt: z.string().optional(),
   systemPrompt: z.string().optional(),
+  // Ephemeral workers: minutes until the launched agent's record expires.
+  // Persisted as expiresAt on the registry record; prune expired=true kills
+  // and clears them. No background reaper — lazy enforcement at next look.
+  ttlMinutes: z.number().int().positive().max(5256000).optional(),
 });
 
 export const AgentPresetSchema = AgentPresetSharedSchema.extend({
@@ -195,6 +201,10 @@ export const RegistryRecordSchema = z.object({
   verifyOutcome: z.enum(["ready", "failed", "timeout", "blocked"]).optional(),
   verifyLatencyMs: z.number().optional(),
   verifyReason: z.string().optional(),
+  // Ephemeral worker TTL: ISO timestamp after which the record is expired.
+  // Set at launch from ttlMinutes (preset or tool param); reconcile flags
+  // expired records and prune expired=true kills + clears them.
+  expiresAt: z.string().optional(),
 });
 export type RegistryRecord = z.infer<typeof RegistryRecordSchema>;
 

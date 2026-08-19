@@ -124,6 +124,30 @@ export async function listHcomAgents(): Promise<HcomAgent[]> {
 }
 
 /**
+ * Load the names of agents that stopped cleanly, as reported by
+ * `hcom list --stopped --all`. The CLI prints a human table (no --json), so
+ * names are parsed from the `  <name> (<tool> ...)` rows. Used by reconcile
+ * to distinguish stopped-cleanly records from lost ones.
+ *
+ * ponytail: the table format is parsed with a regex because the CLI offers no
+ * --json for stopped agents; if hcom ever adds one, switch to it before the
+ * format drifts.
+ */
+export async function listStoppedAgentNames(): Promise<string[]> {
+  const result = await execHcom(["list", "--stopped", "--all"]);
+  if (result.exitCode !== 0) {
+    throw new Error(`hcom list --stopped failed: ${result.stderr || result.stdout}`);
+  }
+
+  const names: string[] = [];
+  for (const line of result.stdout.split("\n")) {
+    const match = line.match(/^\s{2}(\S+)\s+\(/);
+    if (match) names.push(match[1]);
+  }
+  return names;
+}
+
+/**
  * Match an hcom agent by either its display `name` or bare `base_name`.
  */
 export function findLiveAgentByIdentifier(

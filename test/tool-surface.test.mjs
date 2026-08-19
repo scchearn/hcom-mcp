@@ -19,8 +19,9 @@ import { registerAdoptTool } from '../dist/tools/adopt.js';
 import { registerPruneTool } from '../dist/tools/prune.js';
 import { registerContinueFromTool } from '../dist/tools/continue_from.js';
 import * as configModule from '../dist/config.js';
+import { matchLiveAgent, reconcileManagedRecords } from '../dist/registry.js';
 
-const { registerListManagedTool, matchLiveAgent, reconcileManagedRecords } = listModule;
+const { registerListManagedTool } = listModule;
 const { getConfigPaths, summarizeAgentPresets, summarizeTopologyPresets } = configModule;
 const { listHarnessModels } = hcomModule;
 
@@ -1187,7 +1188,28 @@ test('reconcileManagedRecords marks missing unreleased records as managed_lost',
 
   assert.equal(reconciled[0].state, 'managed_active');
   assert.equal(reconciled[1].state, 'managed_lost');
-  assert.equal(reconciled[2].state, 'managed_stopped');
+  // A stopped record whose agent is neither live nor in `hcom list --stopped`
+  // demotes to lost (it vanished without a clean stop).
+  assert.equal(reconciled[2].state, 'managed_lost');
+});
+
+test('reconcile keeps a stopped record stopped when the agent stopped cleanly', () => {
+  const records = [
+    {
+      id: '3',
+      workspace: '/repo',
+      harness: 'opencode',
+      hcomName: 'mike',
+      launchMode: 'headless',
+      state: 'managed_stopped',
+      createdAt: '2026-05-14T00:00:00.000Z',
+      lastSeenAt: '2026-05-14T00:00:00.000Z',
+      released: false,
+    },
+  ];
+
+  const reconciled = reconcileManagedRecords(records, [], ['mike']);
+  assert.equal(reconciled[0].state, 'managed_stopped');
 });
 
 test('getConfigPaths returns the expected path filenames', () => {
@@ -1229,6 +1251,7 @@ test('summarizeAgentPresets returns prompt-presence flags instead of prompt text
       headless: true,
       pty: false,
       tag: 'research',
+      ttlMinutes: null,
       hasDir: false,
       hasPrompt: true,
       hasSystemPrompt: true,
