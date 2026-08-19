@@ -1251,6 +1251,7 @@ test('summarizeAgentPresets returns prompt-presence flags instead of prompt text
       headless: true,
       pty: false,
       tag: 'research',
+      ttlMinutes: null,
       hasDir: false,
       hasPrompt: true,
       hasSystemPrompt: true,

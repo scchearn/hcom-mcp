@@ -20,6 +20,7 @@ type ResolvedLaunchPreset = {
   prompt?: string;
   systemPrompt?: string;
   reasoning?: string;
+  ttlMinutes?: number;
 };
 
 type LaunchResult = {
@@ -70,6 +71,7 @@ function resolvePresetHarness(
     prompt: preset.prompt,
     systemPrompt: preset.systemPrompt,
     reasoning: variant.reasoning,
+    ttlMinutes: preset.ttlMinutes,
   };
 }
 
@@ -126,8 +128,9 @@ export function registerLaunchTool(server: any) {
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
       sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
       reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
+      ttl_minutes: z.number().int().positive().optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ttl_minutes }: {
       harness: Harness;
       preset?: string;
       model?: string;
@@ -137,6 +140,7 @@ export function registerLaunchTool(server: any) {
       workspace?: string;
       sender_name?: string;
       reasoning?: string;
+      ttl_minutes?: number;
     }) => {
       const cwd = workspace ?? process.cwd();
 
@@ -201,6 +205,9 @@ export function registerLaunchTool(server: any) {
           if (reasoning) {
             resolvedPreset.reasoning = reasoning;
           }
+          if (ttl_minutes) {
+            resolvedPreset.ttlMinutes = ttl_minutes;
+          }
 
           // Resolve effective prompt upstream
           resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
@@ -225,6 +232,7 @@ export function registerLaunchTool(server: any) {
             prompt: prompt ?? defaultPromptForHarness(harness),
             systemPrompt: undefined,
             reasoning,
+            ttlMinutes: ttl_minutes,
           };
 
           const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName);
@@ -258,13 +266,15 @@ export function registerTopologyLaunchTool(server: any) {
       sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
       verify: z.boolean().optional().describe("Gate each launched agent on readiness and report outcomes (default: false)"),
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness when verify=true (default: 60)"),
+      ttl_minutes: z.number().int().positive().optional().describe("Ephemeral worker TTL in minutes, applied to every role in the batch: records expire after this and prune expired=true kills + clears them. Overrides per-preset ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
-    async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec }: {
+    async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec, ttl_minutes }: {
       topology: string;
       workspace?: string;
       sender_name?: string;
       verify?: boolean;
       ready_timeout_sec?: number;
+      ttl_minutes?: number;
     }) => {
       const cwd = workspace ?? process.cwd();
 
@@ -343,6 +353,8 @@ export function registerTopologyLaunchTool(server: any) {
 
         for (const { role, resolved } of resolvedRoles) {
           try {
+            // Batch-level TTL applies to every role when set on the topology call.
+            if (ttl_minutes) resolved.ttlMinutes = ttl_minutes;
             const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache, callerName);
             launched.push(result);
             registryIds.push(...result.registryIds);
@@ -522,6 +534,9 @@ export async function launchAgent(
   // 0 = ready, 1 = spawn error / launch_failed, 2 = still launching or blocked
   // on user attention (agent alive). A live-but-blocked agent must never be
   // left invisible to kill/stop/list_managed/prune.
+  const expiresAt = preset.ttlMinutes
+    ? new Date(Date.now() + preset.ttlMinutes * 60 * 1000).toISOString()
+    : undefined;
   const records = hcomNames.map((hcomName) =>
     addRecord({
       workspace,
@@ -533,6 +548,7 @@ export async function launchAgent(
       state: classifyLaunchState(result.exitCode),
       released: false,
       launchedBy,
+      expiresAt,
     })
   );
 
@@ -768,8 +784,9 @@ export function registerSpawnAndVerifyTool(server: any) {
       reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness (default: 60)"),
       on_blocked: z.enum(["report", "rescue"]).optional().describe("What to do when the agent is blocked on user attention (default: report)"),
+      ttl_minutes: z.number().int().positive().optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked, ttl_minutes }: {
       harness: Harness;
       preset?: string;
       model?: string;
@@ -781,6 +798,7 @@ export function registerSpawnAndVerifyTool(server: any) {
       reasoning?: string;
       ready_timeout_sec?: number;
       on_blocked?: "report" | "rescue";
+      ttl_minutes?: number;
     }) => {
       const cwd = workspace ?? process.cwd();
       const readyTimeoutSec = ready_timeout_sec ?? 60;
@@ -834,6 +852,7 @@ export function registerSpawnAndVerifyTool(server: any) {
           if (model) resolvedPreset.model = model;
           if (tag) resolvedPreset.tag = tag;
           if (reasoning) resolvedPreset.reasoning = reasoning;
+          if (ttl_minutes) resolvedPreset.ttlMinutes = ttl_minutes;
           resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
         } else {
           resolvedPreset = {
@@ -847,6 +866,7 @@ export function registerSpawnAndVerifyTool(server: any) {
             prompt: prompt ?? defaultPromptForHarness(harness),
             systemPrompt: undefined,
             reasoning,
+            ttlMinutes: ttl_minutes,
           };
         }
 

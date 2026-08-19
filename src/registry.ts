@@ -312,11 +312,26 @@ export function matchLiveAgent(
 }
 
 /**
+ * True when a record's expiresAt has passed. Records without expiresAt never
+ * expire.
+ */
+export function isRecordExpired(record: RegistryRecord, now: number = Date.now()): boolean {
+  if (!record.expiresAt) return false;
+  const expiry = new Date(record.expiresAt).getTime();
+  return Number.isFinite(expiry) && now > expiry;
+}
+
+/**
  * Settle registry records against live hcom state. This is the single
  * live-vs-record truth engine: it demotes never-live records to lost, promotes
- * stopped/blocked records that are live again, and keeps cleanly-stopped
- * records stopped. `stoppedNames` (from `hcom list --stopped`) lets a record
- * that stopped cleanly stay stopped instead of being demoted to lost.
+ * stopped/blocked records that are live again, and flags expired ephemeral
+ * records. `stoppedNames` (from `hcom list --stopped`) lets a record that
+ * stopped cleanly stay stopped instead of being demoted to lost.
+ *
+ * Expired records are flagged with state "managed_expired" (or
+ * "adopted_expired" for adopted records) so prune's expired mode can find
+ * them; the state is a flag, not a lifecycle claim — the agent may still be
+ * alive and is killed by prune expired=true.
  */
 export function reconcileManagedRecords(
   records: RegistryRecord[],
@@ -326,6 +341,14 @@ export function reconcileManagedRecords(
   return records.map((record) => {
     if (record.released || !record.hcomName) {
       return record;
+    }
+
+    // Expiry wins over every other transition: an expired ephemeral worker
+    // must be flagged regardless of what hcom currently reports.
+    if (isRecordExpired(record)) {
+      const expiredState = record.state.startsWith("adopted_") ? "adopted_expired" : "managed_expired";
+      if (record.state === expiredState) return record;
+      return { ...record, state: expiredState as OwnershipState };
     }
 
     const liveAgent = matchLiveAgent(record, hcomAgents);
@@ -418,6 +441,7 @@ export async function pruneRecords(
     stoppedOlderThanDays?: number;
     confirm?: boolean;
     allWorkspaces?: boolean;
+    expired?: boolean;
   } = {},
 ): Promise<{ removed: RegistryRecord[]; wouldRemove: RegistryRecord[] }> {
   const {
@@ -428,11 +452,12 @@ export async function pruneRecords(
     stoppedOlderThanDays = 30,
     confirm = false,
     allWorkspaces = false,
+    expired = false,
   } = options;
 
-  // Reconcile first: demote never-live records to lost so the age rules below
-  // can reach them. Without this, phantom managed_active records are invisible
-  // to prune forever.
+  // Reconcile first: demote never-live records to lost (and flag expired
+  // ephemeral records) so the age rules below can reach them. Without this,
+  // phantom managed_active records are invisible to prune forever.
   const [hcomAgents, stoppedNames] = await Promise.all([
     listHcomAgents(),
     listStoppedAgentNames(),
@@ -445,6 +470,7 @@ export async function pruneRecords(
 
   const lostStates: OwnershipState[] = ["managed_lost", "adopted_lost"];
   const stoppedStates: OwnershipState[] = ["managed_stopped", "adopted_stopped"];
+  const expiredStates: OwnershipState[] = ["managed_expired", "adopted_expired"];
   const protectedStates: OwnershipState[] = ["managed_active", "adopted_active", "managed_released", "managed_blocked"];
 
   const workspaceRecords = allWorkspaces
@@ -461,6 +487,14 @@ export async function pruneRecords(
   for (const record of workspaceRecords) {
     // Never prune active/released/blocked records
     if (protectedStates.includes(record.state)) continue;
+
+    // expired=true is an exclusive mode: only expired ephemeral records are
+    // targeted, so the kill+clear workflow never accidentally removes records
+    // the caller did not ask for.
+    if (expired) {
+      if (expiredStates.includes(record.state)) toRemove.push(record);
+      continue;
+    }
 
     if (lostStates.includes(record.state) && isOlderThan(record, lostOlderThanDays)) {
       toRemove.push(record);

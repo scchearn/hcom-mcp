@@ -239,6 +239,7 @@ export function summarizeAgentPresets(
       headless: preset.headless,
       pty: preset.pty,
       tag: preset.tag ?? null,
+      ttlMinutes: preset.ttlMinutes ?? null,
       hasDir: Boolean(preset.dir),
       hasPrompt: Boolean(preset.prompt),
       hasSystemPrompt: Boolean(preset.systemPrompt),
