@@ -20,7 +20,7 @@ export function registerAdoptTool(server: any) {
     "Adopt an existing hcom agent into managed lifecycle. Creates an adopted registry record for an agent that was not spawned by hcom-mcp, enabling stop/kill management. Requires the agent to be live in hcom. Sends an hcom inform message to the adoptee with adoption instructions (hub name, harness, workspace, and the 'using-hcom' skill loading instruction).",
     {
       name: z.string().describe("hcom agent name to adopt"),
-      workspace: z.string().optional().describe("Workspace path for registry"),
+      workspace: z.string().optional().describe("Workspace path for registry. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so the record is scoped to the workspace you query with list_managed."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
     },
     async ({ name, workspace, sender_name }: { name: string; workspace?: string; sender_name?: string }) => {
@@ -39,7 +39,10 @@ export function registerAdoptTool(server: any) {
           };
         }
 
-        // Verify agent exists in hcom
+        // Verify agent exists in hcom, canonicalizing the incoming name to
+        // the live agent's base form. The registry stores base names, so the
+        // idempotency lookup and the record write must use the canonical form
+        // or adopting the same agent via either name form creates duplicates.
         const allAgents = await listHcomAgents();
         const liveAgent = findLiveAgentByIdentifier(name, allAgents);
         if (!liveAgent) {
@@ -48,9 +51,13 @@ export function registerAdoptTool(server: any) {
             isError: true,
           };
         }
+        const canonicalName = liveAgent.base_name;
 
-        // Hub self-protection: cannot adopt the calling hub agent
-        if (caller && caller === name) {
+        // Hub self-protection: cannot adopt the calling hub agent. Compare
+        // against the canonical base name AND the live display name so a hub
+        // adopting its own tag-prefixed form is refused exactly like its bare
+        // form.
+        if (caller === canonicalName || caller === liveAgent.name) {
           return {
             content: [{ type: "text" as const, text: "Cannot adopt the calling hub agent" }],
             isError: true,
@@ -58,7 +65,7 @@ export function registerAdoptTool(server: any) {
         }
 
         // Idempotency: check if record already exists and is not released
-        const existing = findRecordByWorkspaceAndName(cwd, name);
+        const existing = findRecordByWorkspaceAndName(cwd, canonicalName);
         if (existing) {
           return {
             content: [{
@@ -84,13 +91,13 @@ export function registerAdoptTool(server: any) {
         const record = adoptRecord({
           workspace: cwd,
           harness,
-          hcomName: name,
+          hcomName: canonicalName,
           sessionId: liveAgent.session_id,
         });
 
         // ponytail: one-shot inform, not a thread; upgrade to thread if durability needed
-        const text = defaultAdoptNotice(caller, name, harness, cwd);
-        const r = await execHcom(["send", `@${name}`, "--name", caller, "--intent", "inform", "--", text]);
+        const text = defaultAdoptNotice(caller, canonicalName, harness, cwd);
+        const r = await execHcom(["send", `@${canonicalName}`, "--name", caller, "--intent", "inform", "--", text]);
         const notify = { delivered: r.exitCode === 0, ...(r.exitCode !== 0 && { error: r.stderr || r.stdout }) };
 
         return {

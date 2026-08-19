@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { execHcom, findLiveAgentByIdentifier, listHcomAgents, parseHcomJson } from "../hcom.js";
+import {
+  canonicalizeAgentName,
+  execHcom,
+  findLiveAgentByIdentifier,
+  listHcomAgents,
+  parseHcomJson,
+} from "../hcom.js";
 import { getOwnedRecordsByWorkspace } from "../registry.js";
 
 export function registerInspectTool(server: any) {
@@ -10,7 +16,7 @@ export function registerInspectTool(server: any) {
       name: z.string().describe("hcom agent name to inspect"),
       aspect: z.enum(["status", "transcript", "events", "term"]).describe("What to inspect"),
       last: z.number().optional().describe("Last N items (for transcript/events)"),
-      workspace: z.string().optional().describe("Workspace path for ownership verification"),
+      workspace: z.string().optional().describe("Workspace path for ownership verification. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace."),
     },
     async ({ name, aspect, last, workspace }: {
       name: string;
@@ -21,9 +27,11 @@ export function registerInspectTool(server: any) {
       const cwd = workspace ?? process.cwd();
 
       try {
-        // Verify agent exists in hcom
+        // Verify agent exists in hcom, canonicalizing the incoming name so a
+        // tag-prefixed display name resolves to the same live agent and record.
         const allAgents = await listHcomAgents();
-        const liveAgent = findLiveAgentByIdentifier(name, allAgents);
+        const canonicalName = canonicalizeAgentName(name, allAgents);
+        const liveAgent = findLiveAgentByIdentifier(canonicalName, allAgents);
         if (!liveAgent) {
           return {
             content: [{
@@ -36,7 +44,7 @@ export function registerInspectTool(server: any) {
 
         // Determine management status
         const records = getOwnedRecordsByWorkspace(cwd);
-        const owned = records.find((r) => r.hcomName === liveAgent.name);
+        const owned = records.find((r) => r.hcomName === canonicalName);
         let managementStatus: "managed" | "adopted" | "unmanaged";
         if (owned) {
           if (owned.state.startsWith("adopted_") || owned.preset === "adopted") {
@@ -52,7 +60,7 @@ export function registerInspectTool(server: any) {
 
         switch (aspect) {
           case "status": {
-            const hcomResult = await execHcom(["list", name, "--json"]);
+            const hcomResult = await execHcom(["list", canonicalName, "--json"]);
             if (hcomResult.exitCode !== 0) {
               throw new Error(`hcom list failed: ${hcomResult.stderr}`);
             }
@@ -62,7 +70,7 @@ export function registerInspectTool(server: any) {
 
           case "transcript": {
             const n = last ?? 10;
-            const hcomResult = await execHcom(["transcript", name, `--last=${n}`]);
+            const hcomResult = await execHcom(["transcript", canonicalName, `--last=${n}`]);
             if (hcomResult.exitCode !== 0) {
               throw new Error(`hcom transcript failed: ${hcomResult.stderr}`);
             }
@@ -72,19 +80,22 @@ export function registerInspectTool(server: any) {
 
           case "events": {
             const n = last ?? 20;
-            const hcomResult = await execHcom(["events", "--last", String(n), "--agent", name, "--json"]);
+            // hcom events emits NDJSON by default; there is no --json flag.
+            // Parse each line exactly like thread_inspect does.
+            const hcomResult = await execHcom(["events", "--last", String(n), "--agent", canonicalName]);
             if (hcomResult.exitCode !== 0) {
-              // events --json might not exist, fall back to plain output
-              const fallback = await execHcom(["events", "--last", String(n), "--agent", name]);
-              result = fallback.stdout;
-            } else {
-              result = parseHcomJson(hcomResult.stdout);
+              throw new Error(`hcom events failed: ${hcomResult.stderr}`);
             }
+            result = hcomResult.stdout
+              .split("\n")
+              .filter((line: string) => line.trim())
+              .map((line: string) => parseHcomJson(line))
+              .filter(Boolean);
             break;
           }
 
           case "term": {
-            const hcomResult = await execHcom(["term", name, "--json"]);
+            const hcomResult = await execHcom(["term", canonicalName, "--json"]);
             if (hcomResult.exitCode !== 0) {
               throw new Error(`hcom term failed: ${hcomResult.stderr}`);
             }

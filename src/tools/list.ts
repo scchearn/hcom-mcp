@@ -116,7 +116,7 @@ export function registerListManagedTool(server: any) {
     "list_managed",
     "List all hcom agents managed by this MCP server in the current workspace",
     {
-      workspace: z.string().optional().describe("Workspace path"),
+      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
     async ({ workspace }: { workspace?: string }) => {
       const cwd = workspace ?? process.cwd();
@@ -149,11 +149,13 @@ export function registerListAllTool(server: any) {
   server.tool(
     "list_all",
     "List all live hcom agents visible to the local hcom CLI",
-    {},
-    async () => {
+    {
+      workspace: z.string().optional().describe("Workspace path for ownership resolution. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so managementStatus matches the workspace you query with list_managed."),
+    },
+    async ({ workspace }: { workspace?: string }) => {
       try {
         const agents = await listHcomAgents();
-        const cwd = process.cwd();
+        const cwd = workspace ?? process.cwd();
         const records = getOwnedRecordsByWorkspace(cwd);
 
         const agentsWithStatus = agents.map((agent) => {
@@ -199,7 +201,7 @@ export function registerListPresetsTool(server: any) {
     "list_presets",
     "List merged agent presets available to this server in the current workspace",
     {
-      workspace: z.string().optional().describe("Workspace path"),
+      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
     async ({ workspace }: { workspace?: string }) => {
       const cwd = workspace ?? process.cwd();
@@ -225,7 +227,7 @@ export function registerListTopologiesTool(server: any) {
     "list_topologies",
     "List merged topology presets available to this server in the current workspace",
     {
-      workspace: z.string().optional().describe("Workspace path"),
+      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
     async ({ workspace }: { workspace?: string }) => {
       const cwd = workspace ?? process.cwd();
@@ -251,7 +253,7 @@ export function registerConfigPathsTool(server: any) {
     "config_paths",
     "Show the config and registry paths used by this server",
     {
-      workspace: z.string().optional().describe("Workspace path"),
+      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
     async ({ workspace }: { workspace?: string }) => {
       const cwd = workspace ?? process.cwd();
@@ -276,7 +278,7 @@ export function registerStatusTool(server: any) {
     "status",
     "Show a quick health and orientation summary for hcom-mcp",
     {
-      workspace: z.string().optional().describe("Workspace path"),
+      workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
     async ({ workspace }: { workspace?: string }) => {
       const cwd = workspace ?? process.cwd();

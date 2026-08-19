@@ -163,6 +163,9 @@ function mockUnblockDeps(t, { execHcom, records, callerName, allowlist, liveStat
       listHcomAgents: async () => liveAgents,
       findLiveAgentByIdentifier: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id) ?? null,
+      canonicalizeAgentName: (id, agents) =>
+        agents.find((a) => a.name === id || a.base_name === id)?.base_name ??
+        (id.startsWith('@') ? id.slice(1) : id),
     },
   });
   t.mock.module('../dist/registry.js', {
@@ -190,7 +193,8 @@ function mockUnblockDeps(t, { execHcom, records, callerName, allowlist, liveStat
     namedExports: {
       validateStopKillTarget: async (name, action, senderName, workspace) => {
         const caller = senderName ?? callerName;
-        if (caller === name) {
+        const canonicalName = name.startsWith('@') ? name.slice(1) : name;
+        if (caller === canonicalName) {
           return {
             ok: false,
             response: {
@@ -199,7 +203,7 @@ function mockUnblockDeps(t, { execHcom, records, callerName, allowlist, liveStat
             },
           };
         }
-        const owned = records.find((r) => r.hcomName === name);
+        const owned = records.find((r) => r.hcomName === canonicalName);
         if (!owned) {
           return {
             ok: false,
@@ -212,7 +216,7 @@ function mockUnblockDeps(t, { execHcom, records, callerName, allowlist, liveStat
             },
           };
         }
-        return { ok: true, cwd: workspace, owned, liveAgent: null };
+        return { ok: true, cwd: workspace, owned, liveAgent: null, canonicalName };
       },
     },
   });

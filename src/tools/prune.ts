@@ -6,7 +6,7 @@ export function registerPruneTool(server: any) {
     "prune",
     "Remove stale registry records for workspace. By default, targets managed_lost and adopted_lost records older than 7 days (dry-run only). Use confirm=true to actually remove records. Use includeStopped=true to also target managed_stopped and adopted_stopped records older than 30 days.",
     {
-      workspace: z.string().optional().describe("Workspace path (defaults to current directory)"),
+      workspace: z.string().optional().describe("Workspace path (defaults to the server's working directory; pass explicitly when the server runs under a service manager so records are scoped to the workspace you query with list_managed)"),
       olderThanDays: z.number().default(7).describe("Minimum age in days for lost records to be pruned"),
       includeStopped: z.boolean().default(false).describe("Also target stopped records (managed_stopped, adopted_stopped)"),
       stoppedOlderThanDays: z.number().default(30).describe("Minimum age in days for stopped records to be pruned"),
