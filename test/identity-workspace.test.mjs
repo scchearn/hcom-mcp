@@ -116,7 +116,7 @@ test('kill refuses the hub killing its own tag-prefixed form', async (t) => {
   // The exact #12-B1 bypass: the hub's caller identity IS its tag-prefixed
   // display form, and it targets that same form.
   const response = await server.handlers.get('kill')({
-    name: 'w3-vade',
+    names: ['w3-vade'],
     workspace: '/repo',
     sender_name: 'w3-vade',
   });
@@ -139,7 +139,7 @@ test('kill refuses the hub killing its own bare form via a tag-prefixed target',
   registerLifecycleTools(server);
 
   const response = await server.handlers.get('kill')({
-    name: 'w3-vade',
+    names: ['w3-vade'],
     workspace: '/repo',
     sender_name: 'vade',
   });
@@ -162,7 +162,7 @@ test('stop refuses to the hub stopping its own tag-prefixed form', async (t) => 
   registerLifecycleTools(server);
 
   const response = await server.handlers.get('stop')({
-    name: 'w3-vade',
+    names: ['w3-vade'],
     workspace: '/repo',
     sender_name: 'vade',
   });
@@ -219,7 +219,7 @@ test('kill resolves a tag-prefixed display name to the owned base-name record', 
   registerLifecycleTools(server);
 
   const response = await server.handlers.get('kill')({
-    name: 'team-waka',
+    names: ['team-waka'],
     workspace: '/repo',
     sender_name: 'nora',
   });
@@ -369,6 +369,7 @@ test('list_all accepts a workspace param and resolves records against it', async
       listHcomAgents: async () => LIVE_AGENTS,
       findLiveAgentByIdentifier: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id) ?? null,
+      parseHcomJson: JSON.parse,
       execHcom: async () => ({ exitCode: 0, stdout: 'hcom 0.0.0', stderr: '' }),
     },
   });
