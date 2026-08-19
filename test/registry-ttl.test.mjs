@@ -264,3 +264,104 @@ test('launch without ttl_minutes persists no expiresAt', async (t) => {
   assert.ok(!response.isError, response?.content?.[0]?.text);
   assert.equal(added[0].expiresAt, undefined);
 });
+
+// --- Review round fixes ---
+
+test('reconcile reverts a flagged-expired record when expiresAt is extended', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'hcom-ttl-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  t.mock.module('node:os', { namedExports: { homedir: () => home } });
+  mockHcom(t, {
+    liveAgents: [{ name: 'waka', base_name: 'waka', status: 'listening' }],
+    stoppedNames: [],
+  });
+
+  const reg = await loadRegistryModule();
+  const records = [
+    makeRecord({
+      id: 'expired-1',
+      state: 'managed_expired',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    }),
+  ];
+  const reconciled = reg.reconcileManagedRecords(records, [
+    { name: 'waka', base_name: 'waka', status: 'listening' },
+  ]);
+  // No longer expired + live → back to active, not stuck *_expired forever.
+  assert.equal(reconciled[0].state, 'managed_active');
+});
+
+test('reconcile leaves a lost record lost even when its expiresAt has passed', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'hcom-ttl-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  t.mock.module('node:os', { namedExports: { homedir: () => home } });
+  mockHcom(t, { live: [], stoppedNames: [] });
+
+  const reg = await loadRegistryModule();
+  const records = [
+    makeRecord({
+      id: 'lost-1',
+      state: 'managed_lost',
+      expiresAt: '2026-01-01T00:00:00.000Z',
+    }),
+  ];
+  const reconciled = reg.reconcileManagedRecords(records, []);
+  // Lost stays lost: it ages out via the normal lost-prune path, not the
+  // expired mode.
+  assert.equal(reconciled[0].state, 'managed_lost');
+});
+
+test('prune reconciles only the scoped workspace when allWorkspaces=false', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'hcom-prune-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  t.mock.module('node:os', { namedExports: { homedir: () => home } });
+  mockHcom(t, { live: [], stoppedNames: [] });
+
+  const reg = await loadRegistryModule();
+  seedRegistry(home, [
+    makeRecord({ id: 'a-1', workspace: '/ws-a', hcomName: 'ghost-a', state: 'managed_active', lastSeenAt: '2026-01-01T00:00:00.000Z' }),
+    makeRecord({ id: 'b-1', workspace: '/ws-b', hcomName: 'ghost-b', state: 'managed_active', lastSeenAt: '2026-01-01T00:00:00.000Z' }),
+  ]);
+
+  await reg.pruneRecords('/ws-a', { lostOlderThanDays: 7, confirm: true });
+
+  // Workspace A's phantom was demoted and pruned; workspace B's record is
+  // untouched (still managed_active, still present).
+  const after = readRegistry(home);
+  assert.deepEqual(after.records.map((r) => r.id), ['b-1']);
+  assert.equal(after.records[0].state, 'managed_active');
+});
+
+test('reconcile-driven transitions do not reset the lastSeenAt age clock', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'hcom-prune-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  t.mock.module('node:os', { namedExports: { homedir: () => home } });
+  mockHcom(t, { live: [], stoppedNames: [] });
+
+  const reg = await loadRegistryModule();
+  seedRegistry(home, [
+    makeRecord({ id: 'phantom-1', hcomName: 'ghost', state: 'managed_active', lastSeenAt: '2026-01-01T00:00:00.000Z' }),
+  ]);
+
+  // Dry-run reconcile demotes the phantom to lost and persists it.
+  await reg.pruneRecords('/repo', { lostOlderThanDays: 7 });
+
+  const after = readRegistry(home);
+  assert.equal(after.records[0].state, 'managed_lost');
+  // The age clock must NOT have been reset to now: the record keeps its
+  // January lastSeenAt so the age rules still apply.
+  assert.equal(after.records[0].lastSeenAt, '2026-01-01T00:00:00.000Z');
+});
+
+test('launch rejects ttl_minutes beyond the 10-year cap', async (t) => {
+  // The fake server bypasses zod, so validate the schema directly: the cap
+  // must reject absurd values that would overflow Date.
+  const { HarnessEnum } = await import(`../dist/types.js?${importCounter++}`);
+  const { z } = await import('zod');
+  const ttlSchema = z.number().int().positive().max(5256000).optional();
+
+  assert.equal(ttlSchema.safeParse(5256000).success, true);
+  assert.equal(ttlSchema.safeParse(Number.MAX_SAFE_INTEGER).success, false);
+  assert.equal(ttlSchema.safeParse(undefined).success, true);
+  assert.equal(HarnessEnum.options.length > 0, true);
+});

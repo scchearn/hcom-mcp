@@ -128,6 +128,10 @@ export async function listHcomAgents(): Promise<HcomAgent[]> {
  * `hcom list --stopped --all`. The CLI prints a human table (no --json), so
  * names are parsed from the `  <name> (<tool> ...)` rows. Used by reconcile
  * to distinguish stopped-cleanly records from lost ones.
+ *
+ * ponytail: the table format is parsed with a regex because the CLI offers no
+ * --json for stopped agents; if hcom ever adds one, switch to it before the
+ * format drifts.
  */
 export async function listStoppedAgentNames(): Promise<string[]> {
   const result = await execHcom(["list", "--stopped", "--all"]);

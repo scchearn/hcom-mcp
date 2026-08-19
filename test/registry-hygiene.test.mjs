@@ -204,8 +204,10 @@ test('status reports the hcom version and the full state breakdown', async (t) =
         { id: 'd', state: 'managed_released', released: true },
       ],
       getOwnedRecordsByWorkspace: () => [],
+      // Reconcile demotes a phantom active record to lost: the breakdown must
+      // reflect the post-reconcile state, not the stale pre-reconcile one.
       reconcileWorkspaceRecords: async () => [
-        { id: 'a', state: 'managed_active' },
+        { id: 'a', state: 'managed_lost' },
         { id: 'b', state: 'adopted_lost' },
         { id: 'c', state: 'adopted_lost' },
       ],
@@ -240,11 +242,13 @@ test('status reports the hcom version and the full state breakdown', async (t) =
   assert.equal(payload.hcomVersion, 'hcom 0.7.25');
   assert.equal(payload.hcomAvailable, true);
   // adopted_lost is the largest stale bucket in the wild — it must be visible.
+  // The breakdown is post-reconcile: 'a' shows managed_lost, not the stale
+  // managed_active, and released records are excluded (not owned).
   assert.deepEqual(payload.stateBreakdown, {
-    managed_active: 1,
+    managed_lost: 1,
     adopted_lost: 2,
-    managed_released: 1,
   });
+  assert.equal(payload.managedLostCount, 1);
   assert.equal(payload.managedReleasedCount, 1);
 });
 
@@ -289,6 +293,55 @@ test('status reports hcomVersion null when the CLI version check fails', async (
   const response = await server.handlers.get('status')({ workspace: '/repo' });
   const payload = JSON.parse(response.content[0].text);
   assert.equal(payload.hcomVersion, null);
+});
+
+test('status caches the hcom version across calls', async (t) => {
+  let versionCalls = 0;
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      listHcomAgents: async () => [],
+      listStoppedAgentNames: async () => [],
+      execHcom: async (args) => {
+        assert.deepEqual(args, ['--version']);
+        versionCalls += 1;
+        return { exitCode: 0, stdout: 'hcom 0.7.25', stderr: '' };
+      },
+    },
+  });
+  t.mock.module('../dist/registry.js', {
+    namedExports: {
+      getRecordsByWorkspace: () => [],
+      getOwnedRecordsByWorkspace: () => [],
+      reconcileWorkspaceRecords: async () => [],
+      matchLiveAgent: () => null,
+      persistReconciledState: () => {},
+      reconcileManagedRecords: (records) => records,
+    },
+  });
+  t.mock.module('../dist/config.js', {
+    namedExports: {
+      loadMergedConfig: () => ({ agentPresets: {}, topologyPresets: {} }),
+      getConfigPaths: () => ({}),
+      summarizeAgentPresets: () => [],
+      summarizeTopologyPresets: () => [],
+    },
+  });
+
+  const { registerStatusTool } = await import(`../dist/tools/list.js?${importCounter++}`);
+  const server = {
+    names: [],
+    handlers: new Map(),
+    tool(name, _desc, _schema, handler) {
+      this.names.push(name);
+      this.handlers.set(name, handler);
+    },
+  };
+  registerStatusTool(server);
+
+  await server.handlers.get('status')({ workspace: '/repo' });
+  await server.handlers.get('status')({ workspace: '/repo' });
+  // The version is fetched once per process, not per status poll.
+  assert.equal(versionCalls, 1);
 });
 
 // --- #10: launch ttl_minutes persists expiresAt ---

@@ -128,7 +128,7 @@ export function registerLaunchTool(server: any) {
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
       sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
       reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
-      ttl_minutes: z.number().int().positive().optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
+      ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
     async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ttl_minutes }: {
       harness: Harness;
@@ -266,7 +266,7 @@ export function registerTopologyLaunchTool(server: any) {
       sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
       verify: z.boolean().optional().describe("Gate each launched agent on readiness and report outcomes (default: false)"),
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness when verify=true (default: 60)"),
-      ttl_minutes: z.number().int().positive().optional().describe("Ephemeral worker TTL in minutes, applied to every role in the batch: records expire after this and prune expired=true kills + clears them. Overrides per-preset ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
+      ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes, applied to every role in the batch: records expire after this and prune expired=true kills + clears them. Overrides per-preset ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
     async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec, ttl_minutes }: {
       topology: string;
@@ -784,7 +784,7 @@ export function registerSpawnAndVerifyTool(server: any) {
       reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness (default: 60)"),
       on_blocked: z.enum(["report", "rescue"]).optional().describe("What to do when the agent is blocked on user attention (default: report)"),
-      ttl_minutes: z.number().int().positive().optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
+      ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
     async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked, ttl_minutes }: {
       harness: Harness;

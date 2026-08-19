@@ -225,9 +225,10 @@ export function registerStatusTool(server: any) {
 
         // Full state breakdown across every ownership state, including the
         // stale buckets (adopted_lost is the largest in the wild and was
-        // invisible before).
+        // invisible before). Built from the RECONCILED records so the
+        // breakdown and the derived counts never disagree.
         const stateBreakdown: Record<string, number> = {};
-        for (const record of workspaceRecords) {
+        for (const record of reconciled) {
           stateBreakdown[record.state] = (stateBreakdown[record.state] ?? 0) + 1;
         }
 
@@ -261,10 +262,14 @@ export function registerStatusTool(server: any) {
 /**
  * Read the hcom CLI version via `hcom --version`. Returns null when the CLI
  * is missing or fails, so status stays informative instead of hard-coding
- * availability.
+ * availability. Cached once per process: the version rarely changes within a
+ * session and status is polled.
  */
+let cachedHcomVersion: string | null | undefined;
+
 async function getHcomVersion(): Promise<string | null> {
+  if (cachedHcomVersion !== undefined) return cachedHcomVersion;
   const result = await execHcom(["--version"]);
-  if (result.exitCode !== 0) return null;
-  return result.stdout || null;
+  cachedHcomVersion = result.exitCode === 0 ? (result.stdout || null) : null;
+  return cachedHcomVersion;
 }

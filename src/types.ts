@@ -74,7 +74,7 @@ export const AgentPresetSharedSchema = z.object({
   // Ephemeral workers: minutes until the launched agent's record expires.
   // Persisted as expiresAt on the registry record; prune expired=true kills
   // and clears them. No background reaper — lazy enforcement at next look.
-  ttlMinutes: z.number().int().positive().optional(),
+  ttlMinutes: z.number().int().positive().max(5256000).optional(),
 });
 
 export const AgentPresetSchema = AgentPresetSharedSchema.extend({
