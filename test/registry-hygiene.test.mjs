@@ -189,9 +189,15 @@ test('status reports the hcom version and the full state breakdown', async (t) =
     namedExports: {
       listHcomAgents: async () => [{ name: 'waka', base_name: 'waka', status: 'listening' }],
       listStoppedAgentNames: async () => [],
+      parseHcomJson: JSON.parse,
       execHcom: async (args) => {
-        assert.deepEqual(args, ['--version']);
-        return { exitCode: 0, stdout: 'hcom 0.7.25', stderr: '' };
+        if (args[0] === '--version') {
+          return { exitCode: 0, stdout: 'hcom 0.7.25', stderr: '' };
+        }
+        if (args[0] === 'status') {
+          return { exitCode: 0, stdout: JSON.stringify({ config_valid: true, tools: { claude: { installed: true, hooks: true } } }), stderr: '' };
+        }
+        throw new Error(`unexpected args: ${args.join(' ')}`);
       },
     },
   });
@@ -241,6 +247,9 @@ test('status reports the hcom version and the full state breakdown', async (t) =
   const payload = JSON.parse(response.content[0].text);
   assert.equal(payload.hcomVersion, 'hcom 0.7.25');
   assert.equal(payload.hcomAvailable, true);
+  // #11.6: hcom status --json is folded in as hcomHealth.
+  assert.equal(payload.hcomHealth.config_valid, true);
+  assert.equal(payload.hcomHealth.tools.claude.installed, true);
   // adopted_lost is the largest stale bucket in the wild — it must be visible.
   // The breakdown is post-reconcile: 'a' shows managed_lost, not the stale
   // managed_active, and released records are excluded (not owned).
@@ -257,6 +266,7 @@ test('status reports hcomVersion null when the CLI version check fails', async (
     namedExports: {
       listHcomAgents: async () => [],
       listStoppedAgentNames: async () => [],
+      parseHcomJson: JSON.parse,
       execHcom: async () => ({ exitCode: 1, stdout: '', stderr: 'not found' }),
     },
   });
@@ -293,18 +303,27 @@ test('status reports hcomVersion null when the CLI version check fails', async (
   const response = await server.handlers.get('status')({ workspace: '/repo' });
   const payload = JSON.parse(response.content[0].text);
   assert.equal(payload.hcomVersion, null);
+  assert.equal(payload.hcomHealth, null);
 });
 
 test('status caches the hcom version across calls', async (t) => {
   let versionCalls = 0;
+  let healthCalls = 0;
   t.mock.module('../dist/hcom.js', {
     namedExports: {
       listHcomAgents: async () => [],
       listStoppedAgentNames: async () => [],
+      parseHcomJson: JSON.parse,
       execHcom: async (args) => {
-        assert.deepEqual(args, ['--version']);
-        versionCalls += 1;
-        return { exitCode: 0, stdout: 'hcom 0.7.25', stderr: '' };
+        if (args[0] === '--version') {
+          versionCalls += 1;
+          return { exitCode: 0, stdout: 'hcom 0.7.25', stderr: '' };
+        }
+        if (args[0] === 'status') {
+          healthCalls += 1;
+          return { exitCode: 0, stdout: JSON.stringify({ config_valid: true }), stderr: '' };
+        }
+        throw new Error(`unexpected args: ${args.join(' ')}`);
       },
     },
   });
@@ -340,8 +359,9 @@ test('status caches the hcom version across calls', async (t) => {
 
   await server.handlers.get('status')({ workspace: '/repo' });
   await server.handlers.get('status')({ workspace: '/repo' });
-  // The version is fetched once per process, not per status poll.
+  // The version and health are fetched once per process, not per status poll.
   assert.equal(versionCalls, 1);
+  assert.equal(healthCalls, 1);
 });
 
 // --- #10: launch ttl_minutes persists expiresAt ---
