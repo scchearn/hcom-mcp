@@ -2,7 +2,7 @@
 import { createServer } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { registerLaunchTool, registerTopologyLaunchTool } from "./tools/launch.js";
+import { registerLaunchTool, registerSpawnAndVerifyTool, registerTopologyLaunchTool } from "./tools/launch.js";
 import {
   registerConfigPathsTool,
   registerListAllTool,
@@ -19,6 +19,7 @@ import { registerPruneTool } from "./tools/prune.js";
 import { registerLifecycleTools } from "./tools/lifecycle.js";
 import { registerThreadSeedTool, registerThreadInspectTool } from "./tools/threads.js";
 import { registerAdoptTool } from "./tools/adopt.js";
+import { registerUnblockTool } from "./tools/unblock.js";
 import { isHcomAvailable } from "./hcom.js";
 
 const PORT = parseInt(process.env.HCOM_MCP_PORT ?? "3111", 10);
@@ -26,6 +27,7 @@ const PORT = parseInt(process.env.HCOM_MCP_PORT ?? "3111", 10);
 function createHcomMcpServer(): McpServer {
   const s = new McpServer({ name: "hcom-mcp", version: "0.1.0" });
   registerLaunchTool(s);
+  registerSpawnAndVerifyTool(s);
   registerTopologyLaunchTool(s);
   registerListManagedTool(s);
   registerListAllTool(s);
@@ -43,6 +45,7 @@ function createHcomMcpServer(): McpServer {
   registerThreadSeedTool(s);
   registerThreadInspectTool(s);
   registerAdoptTool(s);
+  registerUnblockTool(s);
   return s;
 }
 

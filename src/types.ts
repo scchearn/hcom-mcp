@@ -113,17 +113,38 @@ export const TopologyPresetSchema = z.object({
 });
 export type TopologyPreset = z.infer<typeof TopologyPresetSchema>;
 
+// --- Rescue allowlist (unblock / spawn_and_verify) ---
+
+// Regexes matched (case-insensitive) against the launch_blocked detail text to
+// decide whether a blocked agent is stuck on a rescuable dialog (workspace
+// trust, permission-mode default, model/provider picker). Config-driven so new
+// dialogs never require a code release. One rescue attempt max per gate; a
+// dialog surviving one Enter needs a human.
+export const RescueAllowlistSchema = z.object({
+  enabled: z.boolean().default(true),
+  patterns: z.array(z.string().min(1)).default([
+    "trust this folder",
+    "do you trust",
+    "permission mode",
+    "select a model",
+    "choose a provider",
+  ]),
+});
+export type RescueAllowlist = z.infer<typeof RescueAllowlistSchema>;
+
 // --- Global config schema ---
 
 export const GlobalConfigInputSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetInputSchema).default({}),
   topologyPresets: z.record(z.string(), TopologyPresetSchema).default({}),
+  rescueAllowlist: RescueAllowlistSchema.default({}),
 });
 export type GlobalConfigInput = z.infer<typeof GlobalConfigInputSchema>;
 
 export const GlobalConfigSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetSchema).default({}),
   topologyPresets: z.record(z.string(), TopologyPresetSchema).default({}),
+  rescueAllowlist: RescueAllowlistSchema.default({}),
 });
 export type GlobalConfig = z.infer<typeof GlobalConfigSchema>;
 
@@ -132,12 +153,14 @@ export type GlobalConfig = z.infer<typeof GlobalConfigSchema>;
 export const WorkspaceConfigInputSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetInputSchema).optional(),
   topologyPresets: z.record(z.string(), TopologyPresetSchema).optional(),
+  rescueAllowlist: RescueAllowlistSchema.optional(),
 });
 export type WorkspaceConfigInput = z.infer<typeof WorkspaceConfigInputSchema>;
 
 export const WorkspaceConfigSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetSchema).optional(),
   topologyPresets: z.record(z.string(), TopologyPresetSchema).optional(),
+  rescueAllowlist: RescueAllowlistSchema.optional(),
 });
 export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>;
 
@@ -146,6 +169,7 @@ export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>;
 export const MergedConfigSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetSchema),
   topologyPresets: z.record(z.string(), TopologyPresetSchema),
+  rescueAllowlist: RescueAllowlistSchema.default({}),
 });
 export type MergedConfig = z.infer<typeof MergedConfigSchema>;
 
@@ -167,6 +191,10 @@ export const RegistryRecordSchema = z.object({
   createdAt: z.string(),
   lastSeenAt: z.string(),
   released: z.boolean().default(false),
+  // Spawn verification outcome (spawn_and_verify / launch_topology verify).
+  verifyOutcome: z.enum(["ready", "failed", "timeout", "blocked"]).optional(),
+  verifyLatencyMs: z.number().optional(),
+  verifyReason: z.string().optional(),
 });
 export type RegistryRecord = z.infer<typeof RegistryRecordSchema>;
 

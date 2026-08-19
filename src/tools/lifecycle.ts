@@ -13,9 +13,9 @@ function formatManagedNames(names: Array<string | undefined>) {
  * 1. Hub self-protection — prevents stopping/killing the calling hub agent
  * 2. Ownership check — agent must have a non-released record in this workspace
  */
-async function validateStopKillTarget(
+export async function validateStopKillTarget(
   name: string,
-  action: "stop" | "kill",
+  action: "stop" | "kill" | "unblock",
   senderName?: string,
   workspace?: string,
 ): Promise<
