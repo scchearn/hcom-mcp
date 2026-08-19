@@ -100,8 +100,20 @@ function loadRegistry(): Registry {
 
   if (bad.length > 0) {
     const quarantinePath = quarantine(JSON.stringify(bad, null, 2), `${bad.length} invalid record(s)`);
-    // Heal the live file so the bad records are not re-quarantined on every load.
-    saveRegistry({ records });
+    // Heal the live file so the bad records are not re-quarantined on every
+    // load. If the heal-write itself fails (disk full, permissions), surface
+    // the informative RegistryError with the quarantine path instead of a raw
+    // FS error: the corrupt data is already preserved, so the caller must
+    // still learn where it went.
+    try {
+      saveRegistry({ records });
+    } catch (err: any) {
+      throw new RegistryError(
+        `Registry at ${REGISTRY_PATH} contained ${bad.length} invalid record(s) and the heal-write failed: ${err.message}. ` +
+          `Invalid records were quarantined to ${quarantinePath}.`,
+        quarantinePath,
+      );
+    }
     throw new RegistryError(
       `Registry at ${REGISTRY_PATH} contained ${bad.length} invalid record(s). ` +
         `Valid records were kept; invalid ones were quarantined to ${quarantinePath}.`,
