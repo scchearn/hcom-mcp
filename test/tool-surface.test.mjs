@@ -374,7 +374,7 @@ test('adopt errors clearly when sender_name is missing for stateless HTTP caller
   registerAdoptTool(server);
 
   const response = await server.handlers.get('adopt')({
-    name: 'zore',
+    names: ['zore'],
     workspace: '/repo',
   });
 
@@ -407,7 +407,7 @@ test('stop errors clearly when sender_name is missing for stateless HTTP callers
   registerLifecycleTools(server);
 
   const response = await server.handlers.get('stop')({
-    name: 'zore',
+    names: ['zore'],
     workspace: '/repo',
   });
 
@@ -440,7 +440,7 @@ test('kill errors clearly when sender_name is missing for stateless HTTP callers
   registerLifecycleTools(server);
 
   const response = await server.handlers.get('kill')({
-    name: 'zore',
+    names: ['zore'],
     workspace: '/repo',
   });
 
@@ -1381,6 +1381,13 @@ test('registerModelResources exposes all fixed model resource URIs', () => {
       'hcom://models/opencode',
       'hcom://models/codex',
       'hcom://models/antigravity',
+      'hcom://models/gemini',
+      'hcom://models/kilo',
+      'hcom://models/pi',
+      'hcom://models/omp',
+      'hcom://models/cursor',
+      'hcom://models/kimi',
+      'hcom://models/copilot',
     ],
   );
 });
@@ -1431,7 +1438,7 @@ test('listHarnessModels returns bundled catalog for codex', async () => {
 test('listHarnessModels returns all harnesses when no harness specified', async () => {
   const results = await listHarnessModels();
 
-  assert.equal(results.length, 4);
+  assert.equal(results.length, 11);
   const statuses = results.map((r) => r.status);
   assert.ok(statuses.includes('live'));
   assert.equal(statuses.includes('bundled'), true);

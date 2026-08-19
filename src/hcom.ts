@@ -242,6 +242,17 @@ const BUNDLED_CODEX_MODELS = [
   "gpt-5.2",
 ];
 
+// Bundled catalogs for the remaining harnesses. Only models that can be
+// verified to exist are cataloged; the harness CLI is the authority on what
+// it accepts, so these are hints, not a closed set.
+const BUNDLED_GEMINI_MODELS = ["gemini-3.1-pro-preview", "gemini-2.5-flash"];
+const BUNDLED_KILO_MODELS = ["kilo/kilo-auto/free"];
+const BUNDLED_PI_MODELS = ["claude-3-5-sonnet"];
+const BUNDLED_OMP_MODELS = ["claude-3-5-sonnet"];
+const BUNDLED_CURSOR_MODELS = ["sonnet-4"];
+const BUNDLED_KIMI_MODELS = ["kimi-k2.6"];
+const BUNDLED_COPILOT_MODELS = ["claude-haiku-4.5"];
+
 function bundledCatalog(
   harness: Harness,
   models: string[],
@@ -294,6 +305,19 @@ export async function discoverHarnessModels(
 
   if (harness === "codex") {
     return bundledCatalog(harness, BUNDLED_CODEX_MODELS);
+  }
+
+  const bundled: Record<string, { models: string[]; notes?: string[] }> = {
+    gemini: { models: BUNDLED_GEMINI_MODELS },
+    kilo: { models: BUNDLED_KILO_MODELS },
+    pi: { models: BUNDLED_PI_MODELS },
+    omp: { models: BUNDLED_OMP_MODELS },
+    cursor: { models: BUNDLED_CURSOR_MODELS },
+    kimi: { models: BUNDLED_KIMI_MODELS },
+    copilot: { models: BUNDLED_COPILOT_MODELS },
+  };
+  if (bundled[harness]) {
+    return bundledCatalog(harness, bundled[harness].models, bundled[harness].notes);
   }
 
   // ponytail: antigravity exposes no --model selection (default Gemini 3.5 Flash Medium);
