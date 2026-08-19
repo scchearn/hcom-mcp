@@ -55,6 +55,8 @@ function mockLaunchDeps(t, { execHcom, addRecord, removeRecords }) {
     namedExports: {
       addRecord: addRecord,
       removeRecords: removeRecords ?? (() => {}),
+      updateRecordState: () => null,
+      updateRecordVerify: () => null,
     },
   });
 }

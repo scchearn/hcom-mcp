@@ -60,9 +60,28 @@ Point any HTTP-capable MCP client at `http://127.0.0.1:3111/mcp`. Example for Cl
 ## Configuration
 
 - `HCOM_MCP_PORT` — HTTP port (default: `3111`)
-- `~/.hcom/mcp/config.json` — presets, topologies, model catalogs
+- `~/.hcom/mcp/config.json` — presets, topologies, model catalogs, rescue allowlist
 - `~/.hcom/mcp/registry.json` — managed agent registry
 - `.hcom-mcp.json` — optional workspace overlay (see `.hcom-mcp.example.json`)
+
+### Rescue allowlist
+
+`unblock` and `spawn_and_verify` only inject input into a blocked agent when
+the pending `launch_blocked` detail matches a pattern in `rescueAllowlist`.
+Defaults cover the known rescuable dialogs (workspace trust, permission mode,
+model/provider picker); add patterns for new dialogs without a code release:
+
+```json
+{
+  "rescueAllowlist": {
+    "enabled": true,
+    "patterns": ["trust this folder", "permission mode"]
+  }
+}
+```
+
+Workspace overlays extend the global patterns; they cannot remove the
+built-in defaults.
 
 ## Skills
 
@@ -82,9 +101,11 @@ Operating guidance ships in `skills/`:
 | Tool | Purpose |
 |------|---------|
 | `launch` | Launch a headless agent (preset or bare harness+model) |
-| `launch_topology` | Launch multiple agents from a topology preset |
+| `spawn_and_verify` | Launch + gate on readiness, with optional guarded rescue of blocked agents |
+| `launch_topology` | Launch multiple agents from a topology preset (optional `verify` gate) |
 | `adopt` | Adopt an external hcom agent into managed lifecycle |
 | `stop` / `kill` | Stop or kill a managed agent |
+| `unblock` | Guarded PTY rescue for a blocked agent (dry-run by default, config allowlist) |
 | `list_managed` | List agents managed by this server |
 | `list_all` | List all live hcom agents |
 | `list_models` | List available models per harness |
