@@ -8,6 +8,17 @@ import {
 } from "../hcom.js";
 import { getOwnedRecordsByWorkspace, updateRecordState } from "../registry.js";
 import type { RegistryRecord, HcomAgent } from "../types.js";
+import {
+  E_AGENT_NOT_FOUND,
+  E_KILL_FAILED,
+  E_NO_SENDER,
+  E_NOT_MANAGED,
+  E_SELF_PROTECTION,
+  E_STOP_FAILED,
+  E_TARGET_REQUIRED,
+  internalError,
+  toolError,
+} from "../errors.js";
 
 function formatManagedNames(names: Array<string | undefined>) {
   const filtered = names.filter(Boolean);
@@ -41,13 +52,10 @@ export async function validateStopKillTarget(
   if (!caller) {
     return {
       ok: false,
-      response: {
-        content: [{
-          type: "text" as const,
-          text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-        }],
-        isError: true,
-      },
+      response: toolError(
+        E_NO_SENDER,
+        "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+      ),
     };
   }
 
@@ -61,10 +69,7 @@ export async function validateStopKillTarget(
   if (caller === canonicalName || caller === liveAgent?.name) {
     return {
       ok: false,
-      response: {
-        content: [{ type: "text" as const, text: `Cannot ${action} the calling hub agent` }],
-        isError: true,
-      },
+      response: toolError(E_SELF_PROTECTION, `Cannot ${action} the calling hub agent`),
     };
   }
 
@@ -75,17 +80,9 @@ export async function validateStopKillTarget(
   if (!owned) {
     return {
       ok: false,
-      response: {
-        content: [
-          {
-            type: "text" as const,
-            text: liveAgent
-              ? `Agent "${name}" is not managed. Use adopt tool first to take ownership.`
-              : `Agent "${name}" not found in hcom.`,
-          },
-        ],
-        isError: true,
-      },
+      response: liveAgent
+        ? toolError(E_NOT_MANAGED, `Agent "${name}" is not managed. Use adopt tool first to take ownership.`)
+        : toolError(E_AGENT_NOT_FOUND, `Agent "${name}" not found in hcom.`),
     };
   }
 
@@ -121,13 +118,10 @@ export async function resolveTeardownTargets(
   if (!caller) {
     return {
       ok: false,
-      response: {
-        content: [{
-          type: "text" as const,
-          text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-        }],
-        isError: true,
-      },
+      response: toolError(
+        E_NO_SENDER,
+        "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+      ),
     };
   }
 
@@ -162,10 +156,7 @@ export async function resolveTeardownTargets(
   if (!names || names.length === 0) {
     return {
       ok: false,
-      response: {
-        content: [{ type: "text" as const, text: "Error: Provide at least one name or a tag." }],
-        isError: true,
-      },
+      response: toolError(E_TARGET_REQUIRED, "Provide at least one name or a tag."),
     };
   }
 
@@ -216,7 +207,7 @@ export async function runTeardown(
       results.push({
         name: canonicalName,
         ok: false,
-        text: `Error: Agent "${canonicalName}" has a stale record but is no longer live in hcom.`,
+        text: `[${E_AGENT_NOT_FOUND}] Agent "${canonicalName}" has a stale record but is no longer live in hcom.`,
       });
       continue;
     }
@@ -230,14 +221,14 @@ export async function runTeardown(
         results.push({
           name: canonicalName,
           ok: false,
-          text: `Error: Agent "${canonicalName}" is no longer live in hcom. Its record was marked ${lostState}.`,
+          text: `[${E_AGENT_NOT_FOUND}] Agent "${canonicalName}" is no longer live in hcom. Its record was marked ${lostState}.`,
         });
         continue;
       }
       results.push({
         name: canonicalName,
         ok: false,
-        text: `Error ${action === "kill" ? "killing" : "stopping"} agent: ${result.stderr || result.stdout}`,
+        text: `[${action === "kill" ? E_KILL_FAILED : E_STOP_FAILED}] Error ${action === "kill" ? "killing" : "stopping"} agent: ${result.stderr || result.stdout}`,
       });
       continue;
     }
@@ -259,12 +250,12 @@ export function registerLifecycleTools(server: any) {
   // stop
   server.tool(
     "stop",
-    "Stop (disconnect) a managed or adopted agent. Accepts one or more names, or a tag to stop every owned agent in the group. Ownership checks are never bypassed; per-name results are returned.",
+    "Stop (disconnect) a managed or adopted agent. Accepts one or more names, or a tag to stop every owned agent in the group. Ownership checks are never bypassed; per-name results are returned. Returns { workspace, results, stopped, failed, skipped? }. Preconditions: targets must be owned in this workspace (E_NOT_MANAGED otherwise) and must not be the calling hub agent (E_SELF_PROTECTION); sender identity required (see sender_name). Related: kill (also closes the terminal pane), adopt (take ownership first).",
     {
       names: z.array(z.string()).optional().describe("hcom agent names to stop. Provide names or tag, not both."),
       tag: z.string().optional().describe("Stop every owned agent carrying this tag (fan out over owned records only)."),
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
-      sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity used for hub self-protection. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
     },
     async ({ names, tag, workspace, sender_name }: { names?: string[]; tag?: string; workspace?: string; sender_name?: string }) => {
       const resolution = await resolveTeardownTargets(names, tag, "stop", sender_name, workspace);
@@ -294,12 +285,12 @@ export function registerLifecycleTools(server: any) {
   // kill
   server.tool(
     "kill",
-    "Kill a managed or adopted agent and close its terminal pane. Accepts one or more names, or a tag to kill every owned agent in the group. Ownership checks are never bypassed; per-name results are returned.",
+    "Kill a managed or adopted agent and close its terminal pane. Accepts one or more names, or a tag to kill every owned agent in the group. Ownership checks are never bypassed; per-name results are returned. Returns { workspace, results, killed, failed, skipped? }. Preconditions: targets must be owned in this workspace (E_NOT_MANAGED otherwise) and must not be the calling hub agent (E_SELF_PROTECTION); sender identity required (see sender_name). Related: stop (disconnect only), adopt (take ownership first).",
     {
       names: z.array(z.string()).optional().describe("hcom agent names to kill. Provide names or tag, not both."),
       tag: z.string().optional().describe("Kill every owned agent carrying this tag (fan out over owned records only)."),
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
-      sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity used for hub self-protection. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
     },
     async ({ names, tag, workspace, sender_name }: { names?: string[]; tag?: string; workspace?: string; sender_name?: string }) => {
       const resolution = await resolveTeardownTargets(names, tag, "kill", sender_name, workspace);

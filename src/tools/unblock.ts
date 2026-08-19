@@ -10,6 +10,14 @@ import { loadMergedConfig } from "../config.js";
 import { getOwnedRecordsByWorkspace, updateRecordState } from "../registry.js";
 import { validateStopKillTarget } from "./lifecycle.js";
 import type { RegistryRecord } from "../types.js";
+import {
+  E_AGENT_NOT_LIVE,
+  E_AGENT_NOT_BLOCKED,
+  E_INJECTION_FAILED,
+  E_INJECTION_REFUSED,
+  internalError,
+  toolError,
+} from "../errors.js";
 
 const SCREEN_TAIL_LINES = 30;
 
@@ -157,14 +165,17 @@ export async function runUnblock(
     return {
       ok: false,
       isError: true,
-      text: `Error: Agent "${name}" is not live in hcom.`,
+      text: toolError(E_AGENT_NOT_LIVE, `Agent "${name}" is not live in hcom.`).content[0].text,
     };
   }
   if (live.status !== "blocked") {
     return {
       ok: false,
       isError: true,
-      text: `Error: Agent "${name}" is not blocked (status: ${live.status}). Refusing to inject input into a working agent.`,
+      text: toolError(
+        E_AGENT_NOT_BLOCKED,
+        `Agent "${name}" is not blocked (status: ${live.status}). Refusing to inject input into a working agent.`,
+      ).content[0].text,
     };
   }
 
@@ -196,7 +207,7 @@ export async function runUnblock(
       isError: true,
       text: JSON.stringify({
         ...report,
-        error: "Rescue allowlist is disabled in config; refusing to inject.",
+        error: `[${E_INJECTION_REFUSED}] Rescue allowlist is disabled in config; refusing to inject.`,
       }, null, 2),
     };
   }
@@ -206,7 +217,7 @@ export async function runUnblock(
       isError: true,
       text: JSON.stringify({
         ...report,
-        error: "Blocked detail does not match any rescue allowlist pattern; refusing to inject. Add a pattern to rescueAllowlist in config if this dialog is known-safe.",
+        error: `[${E_INJECTION_REFUSED}] Blocked detail does not match any rescue allowlist pattern; refusing to inject. Add a pattern to rescueAllowlist in config if this dialog is known-safe.`,
       }, null, 2),
     };
   }
@@ -216,7 +227,7 @@ export async function runUnblock(
     return {
       ok: false,
       isError: true,
-      text: JSON.stringify({ ...report, error: `Injection failed: ${injection.error}` }, null, 2),
+      text: JSON.stringify({ ...report, error: `[${E_INJECTION_FAILED}] Injection failed: ${injection.error}` }, null, 2),
     };
   }
 
@@ -247,11 +258,11 @@ export async function runUnblock(
 export function registerUnblockTool(server: any) {
   server.tool(
     "unblock",
-    "Guarded PTY rescue for a blocked agent. Dry-run by default: returns the terminal screen tail and pending launch_blocked detail without injecting anything. With dry_run=false, injects a single Enter (or optional text) only when the blocked detail matches the config rescue allowlist, then re-checks and transitions the registry record managed_blocked -> managed_active on success. One rescue attempt max; a dialog surviving one Enter needs a human.",
+    "Guarded PTY rescue for a blocked agent. Dry-run by default: returns the terminal screen tail and pending launch_blocked detail without injecting anything. With dry_run=false, injects a single Enter (or optional text) only when the blocked detail matches the config rescue allowlist, then re-checks and transitions the registry record managed_blocked -> managed_active on success. One rescue attempt max; a dialog surviving one Enter needs a human. Returns { agent, dryRun, status, blockedDetail, blockedReason, screenTail, injected?, recheck?, registryTransition? }. Preconditions: agent owned in this workspace (E_NOT_MANAGED), live (E_AGENT_NOT_LIVE), and blocked (E_AGENT_NOT_BLOCKED); sender identity (see sender_name). Related: spawn_and_verify (on_blocked=rescue), watch_agents (blocked flag).",
     {
       name: z.string().describe("hcom agent name"),
       workspace: z.string().optional().describe("Workspace path for ownership verification. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace."),
-      sender_name: z.string().optional().describe("Sender identity used for hub self-protection. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity used for hub self-protection. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
       dry_run: z.boolean().optional().describe("Report only, inject nothing (default: true)"),
       text: z.string().optional().describe("Optional text to inject; Enter-only when omitted"),
     },

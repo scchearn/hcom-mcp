@@ -3,6 +3,7 @@ import { execHcom, resolveCallerName } from "../hcom.js";
 import { addRecord } from "../registry.js";
 import { HarnessEnum } from "../types.js";
 import type { Harness } from "../types.js";
+import { E_INTERNAL, E_LAUNCH_FAILED, E_NO_SENDER, internalError, toolError } from "../errors.js";
 
 /**
  * Parse the agent name from hcom r / hcom f output. Both print
@@ -39,13 +40,10 @@ async function runResumeFork(
 
   const caller = await resolveCallerName(options.sender_name);
   if (!caller) {
-    return {
-      content: [{
-        type: "text" as const,
-        text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
-      }],
-      isError: true,
-    };
+    return toolError(
+      E_NO_SENDER,
+      "Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+    );
   }
 
   const args = [kind === "resume" ? "r" : "f", target];
@@ -57,24 +55,18 @@ async function runResumeFork(
 
   const result = await execHcom(args);
   if (result.exitCode !== 0) {
-    return {
-      content: [{
-        type: "text" as const,
-        text: `Error ${kind === "resume" ? "resuming" : "forking"} agent: ${result.stderr || result.stdout}`,
-      }],
-      isError: true,
-    };
+    return toolError(
+      E_LAUNCH_FAILED,
+      `Error ${kind === "resume" ? "resuming" : "forking"} agent: ${result.stderr || result.stdout}`,
+    );
   }
 
   const spawnedName = parseSpawnedName(result.stdout);
   if (!spawnedName) {
-    return {
-      content: [{
-        type: "text" as const,
-        text: `Error: hcom ${kind} succeeded but no agent name could be parsed from its output. No record was registered. Output: ${result.stdout.slice(0, 200)}`,
-      }],
-      isError: true,
-    };
+    return toolError(
+      E_LAUNCH_FAILED,
+      `hcom ${kind} succeeded but no agent name could be parsed from its output. No record was registered. Output: ${result.stdout.slice(0, 200)}`,
+    );
   }
 
   // Register ownership. The harness is the caller's best knowledge; the
@@ -114,11 +106,11 @@ async function runResumeFork(
 export function registerResumeForkTools(server: any) {
   server.tool(
     "resume",
-    "Resume a stopped agent (hcom r). Registers a new ownership record with a resumedFrom link to the source agent, completing the continue_from handoff story. The source agent's identity is reclaimed when hcom supports it.",
+    "Resume a stopped agent (hcom r). Registers a new ownership record with a resumedFrom link to the source agent, completing the continue_from handoff story. The source agent's identity is reclaimed when hcom supports it. Returns { kind, target, spawnedName, registryId, resumedFrom, command }. Preconditions: sender identity (see sender_name). Related: continue_from (handoff context), fork (branch instead).",
     {
       name: z.string().describe("Target: hcom name, session UUID, ses_<id>, or thread name."),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
-      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
       tag: z.string().optional().describe("Group tag for the resumed agent (names become tag-*)."),
       dir: z.string().optional().describe("Working directory override."),
       headless: z.boolean().optional().describe("Run in background (default: true)."),
@@ -149,21 +141,18 @@ export function registerResumeForkTools(server: any) {
           go: go ?? true,
         });
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     },
   );
 
   server.tool(
     "fork",
-    "Fork an agent session (hcom f): creates a new agent that continues from the forked session. Registers a new ownership record with a resumedFrom link to the source agent.",
+    "Fork an agent session (hcom f): creates a new agent that continues from the forked session. Registers a new ownership record with a resumedFrom link to the source agent. Returns { kind, target, spawnedName, registryId, resumedFrom, command }. Preconditions: sender identity (see sender_name). Related: continue_from (handoff context), resume (continue the same session).",
     {
       name: z.string().describe("Target: hcom name, session UUID, ses_<id>, or thread name."),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
-      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
       tag: z.string().optional().describe("Group tag for the forked agent (names become tag-*)."),
       dir: z.string().optional().describe("Working directory override. Required for remote forks."),
       headless: z.boolean().optional().describe("Run in background (default: true)."),
@@ -194,10 +183,7 @@ export function registerResumeForkTools(server: any) {
           go: go ?? true,
         });
       } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return internalError(err);
       }
     },
   );
