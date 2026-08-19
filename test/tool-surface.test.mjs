@@ -501,6 +501,8 @@ test('launch_topology expands roles by count and tracks each launched worker', a
         };
       },
       removeRecords: () => {},
+      updateRecordState: () => null,
+      updateRecordVerify: () => null,
     },
   });
 
@@ -603,6 +605,8 @@ test('launch_topology rolls back every tracked record when a later launch fails'
       removeRecords: (ids) => {
         removedRecordIds.push(...ids);
       },
+      updateRecordState: () => null,
+      updateRecordVerify: () => null,
     },
   });
 

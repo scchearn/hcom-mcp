@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { execHcom, listHarnessModels, resolveCallerName } from "../hcom.js";
 import type { ExecOptions, ModelDiscoveryResult } from "../hcom.js";
+import { parseLaunchGateResult, parseLifeEvents, parseTermJson } from "../gate.js";
 import { loadMergedConfig, resolveAgentPreset, resolveTopologyPreset, validateTopologyReferences } from "../config.js";
-import { addRecord, removeRecords } from "../registry.js";
+import { addRecord, removeRecords, updateRecordState, updateRecordVerify } from "../registry.js";
 import { HARNESS_COMMAND, HarnessEnum } from "../types.js";
 import type { AgentPreset, Harness, OwnershipState } from "../types.js";
 
@@ -32,6 +33,8 @@ type LaunchResult = {
   blocked?: boolean;
   reason?: string;
 };
+
+export type { LaunchResult };
 
 function defaultPromptForHarness(harness: Harness): string | undefined {
   if (harness === "claude") return "Wait for instructions from the hub.";
@@ -248,16 +251,20 @@ export function registerLaunchTool(server: any) {
 export function registerTopologyLaunchTool(server: any) {
   server.tool(
     "launch_topology",
-    "Launch multiple agents from a topology preset. Rolls back all if any fail.",
+    "Launch multiple agents from a topology preset. Rolls back all if any fail. With verify=true, gates each launched agent on readiness (same gate as spawn_and_verify) and reports per-agent outcomes.",
     {
       topology: z.string().describe("Name of the topology preset from config"),
       workspace: z.string().optional().describe("Workspace path for ownership tracking"),
       sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      verify: z.boolean().optional().describe("Gate each launched agent on readiness and report outcomes (default: false)"),
+      ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness when verify=true (default: 60)"),
     },
-    async ({ topology: topologyName, workspace, sender_name }: {
+    async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec }: {
       topology: string;
       workspace?: string;
       sender_name?: string;
+      verify?: boolean;
+      ready_timeout_sec?: number;
     }) => {
       const cwd = workspace ?? process.cwd();
 
@@ -332,12 +339,25 @@ export function registerTopologyLaunchTool(server: any) {
         // Launch agents one at a time, collecting results for rollback on failure
         const launched: LaunchResult[] = [];
         const registryIds: string[] = [];
+        const verifyOutcomes: VerifyOutcome[] = [];
 
         for (const { role, resolved } of resolvedRoles) {
           try {
             const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache, callerName);
             launched.push(result);
             registryIds.push(...result.registryIds);
+
+            if (verify) {
+              const readyTimeoutSec = ready_timeout_sec ?? 60;
+              for (const [index, name] of result.hcomNames.entries()) {
+                const outcome = await verifyAgent(name, result.batchId, result.registryIds[index], {
+                  workspace: cwd,
+                  readyTimeoutSec,
+                  onBlocked: "report",
+                });
+                verifyOutcomes.push(outcome);
+              }
+            }
           } catch (err: any) {
             // Rollback all previously launched agents
             removeRecords(registryIds);
@@ -363,6 +383,7 @@ export function registerTopologyLaunchTool(server: any) {
               topology: topologyName,
               launched: launched,
               totalAgents: launched.reduce((sum, l) => sum + l.hcomNames.length, 0),
+              ...(verify ? { verifyOutcomes } : {}),
             }, null, 2),
           }],
         };
@@ -379,7 +400,7 @@ export function registerTopologyLaunchTool(server: any) {
 /**
  * Build and execute an hcom launch command for a single agent preset.
  */
-async function launchAgent(
+export async function launchAgent(
   preset: ResolvedLaunchPreset,
   overrides: { prompt?: string; dir?: string },
   workspace: string,
@@ -562,4 +583,306 @@ function classifyLaunchState(exitCode: number): OwnershipState {
   if (exitCode === 0) return "managed_active";
   if (exitCode === 2) return "managed_blocked";
   return "managed_lost";
+}
+
+// --- Spawn verification (spawn_and_verify / launch_topology verify) ---
+
+export interface VerifyOutcome {
+  name: string;
+  outcome: "ready" | "failed" | "timeout" | "blocked";
+  latencyMs: number;
+  reason?: string;
+  detail?: string;
+  screenTail?: string;
+  rescued?: boolean;
+  registryTransition?: string;
+}
+
+/**
+ * Gate a launched agent on its batch reaching a terminal state. One
+ * subprocess call (`hcom events launch <batchId> --timeout <sec>`), not a
+ * polling loop. Falls back to a per-name `hcom events --wait` when the batch
+ * id could not be scraped from the launch output.
+ */
+export async function gateLaunch(
+  name: string,
+  batchId: string | null,
+  readyTimeoutSec: number,
+  execHcomFn: typeof execHcom = execHcom,
+): Promise<{ outcome: "ready" | "failed" | "timeout" | "blocked"; reason?: string; detail?: string }> {
+  const gateTimeoutMs = (readyTimeoutSec + 10) * 1000;
+
+  if (batchId) {
+    const result = await execHcomFn(
+      ["events", "launch", batchId, "--timeout", String(readyTimeoutSec)],
+      { timeoutMs: gateTimeoutMs },
+    );
+    return parseLaunchGateResult(result.stdout, result.exitCode);
+  }
+
+  // Fallback: no batch id (older hcom). Wait for a terminal life event for
+  // this agent; exit 2 is "timeout OR blocked" — disambiguate via the last
+  // life event.
+  const result = await execHcomFn(
+    ["events", "--wait", String(readyTimeoutSec), "--type", "life", "--agent", name],
+    { timeoutMs: gateTimeoutMs },
+  );
+  if (result.exitCode === 0) {
+    const events = parseLifeEvents(result.stdout);
+    const terminal = events.find(
+      (e) => e.action === "ready" || e.action === "launch_failed" || e.action === "launch_blocked",
+    );
+    if (terminal?.action === "ready") return { outcome: "ready" };
+    if (terminal?.action === "launch_failed") {
+      return { outcome: "failed", reason: terminal.reason, detail: terminal.detail };
+    }
+    if (terminal?.action === "launch_blocked") {
+      return { outcome: "blocked", reason: terminal.reason, detail: terminal.detail };
+    }
+  }
+  return { outcome: "timeout" };
+}
+
+/**
+ * Verify a single launched agent: gate on readiness, optionally rescue a
+ * blocked agent (allowlist-guarded, iterating gates until ready), persist the
+ * outcome on the registry record, and return a caller-readable report.
+ */
+export async function verifyAgent(
+  name: string,
+  batchId: string | null,
+  registryId: string,
+  options: {
+    workspace: string;
+    readyTimeoutSec: number;
+    onBlocked: "report" | "rescue";
+    execHcomFn?: typeof execHcom;
+  },
+): Promise<VerifyOutcome> {
+  const execHcomFn = options.execHcomFn ?? execHcom;
+  const startedAt = Date.now();
+
+  let gate = await gateLaunch(name, batchId, options.readyTimeoutSec, execHcomFn);
+  let rescued = false;
+
+  if (gate.outcome === "blocked" && options.onBlocked === "rescue") {
+    // Spawn-time rescue loop: iterate gates until ready (a trust dialog can
+    // take two Enter cycles), still bounded and one-rescue-attempt-per-gate.
+    // Dynamic import keeps the rescue path out of the launch module's link
+    // surface so partial mocks of hcom/registry keep working for plain launch.
+    const { runUnblock } = await import("./unblock.js");
+    const maxGates = 3;
+    for (let attempt = 1; attempt <= maxGates; attempt++) {
+      const rescue = await runUnblock(name, {
+        workspace: options.workspace,
+        dryRun: false,
+        waitSec: options.readyTimeoutSec,
+        execHcomFn,
+      });
+      if (!rescue.ok) {
+        gate = { outcome: "blocked", reason: "rescue refused", detail: rescue.text };
+        break;
+      }
+      if (rescue.state === "ready") {
+        rescued = true;
+        gate = { outcome: "ready" };
+        break;
+      }
+      if (rescue.state === "failed") {
+        gate = { outcome: "failed", reason: "agent lost after rescue", detail: rescue.detail };
+        break;
+      }
+      // Still blocked: one more gate cycle, then give up.
+      gate = await gateLaunch(name, batchId, options.readyTimeoutSec, execHcomFn);
+      if (gate.outcome === "ready") {
+        rescued = true;
+        break;
+      }
+      if (gate.outcome !== "blocked") break;
+    }
+  }
+
+  const latencyMs = Date.now() - startedAt;
+
+  // Persist the outcome onto the registry record: ready → active, failed →
+  // lost (agent gone), timeout/blocked → blocked (alive but waiting).
+  const persistedState: OwnershipState =
+    gate.outcome === "ready" ? "managed_active"
+    : gate.outcome === "failed" ? "managed_lost"
+    : "managed_blocked";
+  updateRecordState(registryId, persistedState);
+  updateRecordVerify(registryId, {
+    outcome: gate.outcome,
+    latencyMs,
+    reason: gate.reason,
+  });
+
+  const screenTail = gate.outcome === "blocked" || gate.outcome === "failed"
+    ? await fetchScreenTailSafe(name, execHcomFn)
+    : undefined;
+
+  return {
+    name,
+    outcome: gate.outcome,
+    latencyMs,
+    reason: gate.reason,
+    detail: gate.detail,
+    screenTail,
+    rescued,
+    registryTransition: persistedState,
+  };
+}
+
+/**
+ * Read a screen tail without throwing; used for blocked/failed reports.
+ */
+async function fetchScreenTailSafe(
+  name: string,
+  execHcomFn: typeof execHcom,
+): Promise<string> {
+  const result = await execHcomFn(["term", name, "--json"]);
+  if (result.exitCode !== 0) {
+    return `(hcom term failed: ${result.stderr || result.stdout})`;
+  }
+  const screen = parseTermJson(result.stdout);
+  return (screen.lines ?? []).slice(-30).join("\n");
+}
+
+/**
+ * Register the spawn_and_verify tool: launch + readiness gate + optional
+ * guarded rescue, with per-agent outcomes and a summary.
+ */
+export function registerSpawnAndVerifyTool(server: any) {
+  server.tool(
+    "spawn_and_verify",
+    "Launch an agent and gate on readiness. Reuses the launch path unchanged; waits for the batch to reach a terminal state (one hcom events launch call, not a polling loop). Classifies ready / failed / timeout / blocked. With on_blocked=rescue, iterates allowlist-guarded rescue gates until ready. Persists outcome + latencyMs + reason on the registry record.",
+    {
+      harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity)"),
+      preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
+      model: z.string().optional().describe("Model name override or standalone model for bare launches"),
+      prompt: z.string().optional().describe("Initial prompt for the agent"),
+      tag: z.string().optional().describe("Tag for the agent (defaults to harness name for bare launches)"),
+      dir: z.string().optional().describe("Working directory override"),
+      workspace: z.string().optional().describe("Workspace path for ownership tracking"),
+      sender_name: z.string().optional().describe("Sender identity recorded as the launcher. Required for HTTP or unbound MCP callers when auto-resolution is unavailable."),
+      reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored)"),
+      ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness (default: 60)"),
+      on_blocked: z.enum(["report", "rescue"]).optional().describe("What to do when the agent is blocked on user attention (default: report)"),
+    },
+    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked }: {
+      harness: Harness;
+      preset?: string;
+      model?: string;
+      prompt?: string;
+      tag?: string;
+      dir?: string;
+      workspace?: string;
+      sender_name?: string;
+      reasoning?: string;
+      ready_timeout_sec?: number;
+      on_blocked?: "report" | "rescue";
+    }) => {
+      const cwd = workspace ?? process.cwd();
+      const readyTimeoutSec = ready_timeout_sec ?? 60;
+      const blockedMode = on_blocked ?? "report";
+
+      try {
+        const callerName = await resolveCallerName(sender_name);
+        if (!callerName) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: "Error: Cannot resolve sender identity. For HTTP or unbound MCP callers, provide the sender_name parameter explicitly. Bound hcom sessions may auto-resolve via 'hcom list self'.",
+            }],
+            isError: true,
+          };
+        }
+
+        if (!presetName && !model) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: "Error: Provide at least a preset or a model. Use list_presets to see available presets, or specify harness + model for a bare launch.",
+            }],
+            isError: true,
+          };
+        }
+
+        let resolvedPreset: ResolvedLaunchPreset;
+        if (presetName) {
+          const config = loadMergedConfig(cwd);
+          const preset = resolveAgentPreset(config, presetName);
+          if (!preset) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Error: Agent preset "${presetName}" not found. Available presets: ${Object.keys(config.agentPresets).join(", ")}. Use list_presets to inspect the merged preset catalog.`,
+              }],
+              isError: true,
+            };
+          }
+          if (!harness) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Error: Launch preset "${preset.name}" requires an explicit harness. Supported: ${getSupportedHarnesses(preset).join(", ")}.`,
+              }],
+              isError: true,
+            };
+          }
+          resolvedPreset = resolvePresetHarness(preset, harness);
+          if (model) resolvedPreset.model = model;
+          if (tag) resolvedPreset.tag = tag;
+          if (reasoning) resolvedPreset.reasoning = reasoning;
+          resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
+        } else {
+          resolvedPreset = {
+            name: "adhoc",
+            harness,
+            model: model!,
+            headless: true,
+            pty: false,
+            tag: tag ?? harness,
+            dir,
+            prompt: prompt ?? defaultPromptForHarness(harness),
+            systemPrompt: undefined,
+            reasoning,
+          };
+        }
+
+        const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName);
+
+        const outcomes: VerifyOutcome[] = [];
+        for (const [index, name] of result.hcomNames.entries()) {
+          const outcome = await verifyAgent(name, result.batchId, result.registryIds[index], {
+            workspace: cwd,
+            readyTimeoutSec,
+            onBlocked: blockedMode,
+          });
+          outcomes.push(outcome);
+        }
+
+        const summary = {
+          total: outcomes.length,
+          ready: outcomes.filter((o) => o.outcome === "ready").length,
+          failed: outcomes.filter((o) => o.outcome === "failed").length,
+          timeout: outcomes.filter((o) => o.outcome === "timeout").length,
+          blocked: outcomes.filter((o) => o.outcome === "blocked").length,
+          rescued: outcomes.filter((o) => o.rescued).length,
+        };
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ launch: result, outcomes, summary }, null, 2),
+          }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
 }

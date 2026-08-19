@@ -169,6 +169,25 @@ export function updateRecordState(id: string, state: OwnershipState): RegistryRe
 }
 
 /**
+ * Persist a spawn-verification outcome (spawn_and_verify / launch_topology
+ * verify) onto a record: outcome, latency, and reason.
+ */
+export function updateRecordVerify(
+  id: string,
+  info: { outcome: "ready" | "failed" | "timeout" | "blocked"; latencyMs: number; reason?: string },
+): RegistryRecord | null {
+  const registry = loadRegistry();
+  const record = registry.records.find((r) => r.id === id);
+  if (!record) return null;
+  record.verifyOutcome = info.outcome;
+  record.verifyLatencyMs = info.latencyMs;
+  record.verifyReason = info.reason;
+  record.lastSeenAt = new Date().toISOString();
+  saveRegistry(registry);
+  return record;
+}
+
+/**
  * Update a record's hcom name and session ID (after hcom assigns them).
  */
 export function updateRecordHcomInfo(

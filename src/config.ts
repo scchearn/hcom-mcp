@@ -6,6 +6,7 @@ import {
   AgentPresetSchema,
   GlobalConfigSchema,
   GlobalConfigInputSchema,
+  RescueAllowlistSchema,
   WorkspaceConfigSchema,
   WorkspaceConfigInputSchema,
   MergedConfigSchema,
@@ -56,6 +57,7 @@ function normalizeGlobalConfig(input: GlobalConfigInput): GlobalConfig {
   return GlobalConfigSchema.parse({
     agentPresets: normalizeAgentPresets(input.agentPresets),
     topologyPresets: input.topologyPresets,
+    rescueAllowlist: input.rescueAllowlist,
   });
 }
 
@@ -63,11 +65,16 @@ function normalizeWorkspaceConfig(input: WorkspaceConfigInput): WorkspaceConfig 
   return WorkspaceConfigSchema.parse({
     agentPresets: input.agentPresets ? normalizeAgentPresets(input.agentPresets) : undefined,
     topologyPresets: input.topologyPresets,
+    rescueAllowlist: input.rescueAllowlist,
   });
 }
 
 export function loadGlobalConfig(cwd: string): GlobalConfig {
-  let globalConfig: GlobalConfig = { agentPresets: {}, topologyPresets: {} };
+  let globalConfig: GlobalConfig = {
+    agentPresets: {},
+    topologyPresets: {},
+    rescueAllowlist: RescueAllowlistSchema.parse({}),
+  };
 
   if (existsSync(GLOBAL_CONFIG_PATH)) {
     try {
@@ -125,6 +132,16 @@ export function mergeConfigs(
     topologyPresets: {
       ...global.topologyPresets,
       ...(workspace.topologyPresets ?? {}),
+    },
+    // Workspace patterns extend (never replace) the global defaults: a
+    // workspace can add dialogs it knows are safe, but cannot silently drop
+    // the conservative built-ins.
+    rescueAllowlist: {
+      enabled: workspace.rescueAllowlist?.enabled ?? global.rescueAllowlist.enabled,
+      patterns: Array.from(new Set([
+        ...global.rescueAllowlist.patterns,
+        ...(workspace.rescueAllowlist?.patterns ?? []),
+      ])),
     },
   });
 }
