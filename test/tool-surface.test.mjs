@@ -76,12 +76,15 @@ test('registerThreadInspectTool exposes the bare thread_inspect name', () => {
   assert.deepEqual(server.names, ['thread_inspect']);
 });
 
-test('thread_seed errors clearly when hub_name is missing for unresolved HTTP or unbound callers', async (t) => {
+test('thread_seed defaults hub_name to sender_name when omitted', async (t) => {
+  let capturedArgs;
+
   t.mock.module('../dist/hcom.js', {
     namedExports: {
       resolveCallerName: async (override) => override,
-      execHcom: async () => {
-        throw new Error('execHcom should not be called when hub resolution fails');
+      execHcom: async (args) => {
+        capturedArgs = args;
+        return { exitCode: 0, stdout: 'ok', stderr: '' };
       },
       parseHcomJson: JSON.parse,
     },
@@ -98,9 +101,12 @@ test('thread_seed errors clearly when hub_name is missing for unresolved HTTP or
     sender_name: 'nora',
   });
 
-  assert.equal(response.isError, true);
-  assert.match(response.content[0].text, /hub_name/i);
-  assert.match(response.content[0].text, /http|unbound/i);
+  assert.ok(!response.isError, response?.content?.[0]?.text);
+  assert.deepEqual(capturedArgs.slice(0, 6), ['send', '@nora', '@eng-', '--name', 'nora', '--thread']);
+  const payload = JSON.parse(response.content[0].text);
+  assert.equal(payload.senderName, 'nora');
+  assert.equal(payload.hubName, 'nora');
+  assert.deepEqual(payload.mentions, ['@nora', '@eng-']);
 });
 
 test('thread_seed errors clearly when sender_name is missing for stateless HTTP callers', async (t) => {
@@ -158,7 +164,8 @@ test('thread_seed prepends exact hub mention when absent', async (t) => {
   assert.ok(!response.isError, response?.content?.[0]?.text);
   assert.deepEqual(capturedArgs.slice(0, 6), ['send', '@zore', '@eng-', '--name', 'nora', '--thread']);
   const payload = JSON.parse(response.content[0].text);
-  assert.equal(payload.sender_name, 'nora');
+  assert.equal(payload.senderName, 'nora');
+  assert.equal(payload.hubName, 'zore');
   assert.deepEqual(payload.mentions, ['@zore', '@eng-']);
 });
 
@@ -857,7 +864,7 @@ test('continue_from rejects empty and @-only names without calling hcom', async 
   for (const name of ['', '@']) {
     const response = await handler({ name });
     assert.equal(response.isError, true);
-    assert.equal(response.content[0].text, 'Error: name is required');
+    assert.equal(response.content[0].text, '[E_NAME_REQUIRED] name is required');
   }
 
   assert.equal(called, false);
@@ -885,11 +892,11 @@ test('continue_from surfaces stderr or stdout for a nonzero hcom exit', async (t
 
   const stderrResponse = await handler({ name: 'mosa' });
   assert.equal(stderrResponse.isError, true);
-  assert.equal(stderrResponse.content[0].text, 'Error preparing bundle: hcom DB locked');
+  assert.equal(stderrResponse.content[0].text, '[E_BUNDLE_FAILED] Error preparing bundle: hcom DB locked');
 
   const stdoutResponse = await handler({ name: 'mosa' });
   assert.equal(stdoutResponse.isError, true);
-  assert.equal(stdoutResponse.content[0].text, 'Error preparing bundle: fallback output');
+  assert.equal(stdoutResponse.content[0].text, '[E_BUNDLE_FAILED] Error preparing bundle: fallback output');
 });
 
 test('continue_from rejects exit-zero non-JSON output', async (t) => {
@@ -911,7 +918,7 @@ test('continue_from rejects exit-zero non-JSON output', async (t) => {
   assert.equal(response.isError, true);
   assert.equal(
     response.content[0].text,
-    `Error preparing bundle: hcom returned non-JSON output: ${stdout.slice(0, 200)}`,
+    `[E_BUNDLE_FAILED] Error preparing bundle: hcom returned non-JSON output: ${stdout.slice(0, 200)}`,
   );
 });
 

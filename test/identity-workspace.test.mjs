@@ -301,7 +301,7 @@ test('adopt writes the record under the live base name, not the display name', a
   registerAdoptTool(server);
 
   const response = await server.handlers.get('adopt')({
-    name: 'team-waka',
+    names: ['team-waka'],
     workspace: '/repo',
     sender_name: 'nora',
   });
@@ -343,12 +343,12 @@ test('adopting the same agent via either name form is idempotent', async (t) => 
   registerAdoptTool(server);
 
   const first = await server.handlers.get('adopt')({
-    name: 'team-waka',
+    names: ['team-waka'],
     workspace: '/repo',
     sender_name: 'nora',
   });
   const second = await server.handlers.get('adopt')({
-    name: 'waka',
+    names: ['waka'],
     workspace: '/repo',
     sender_name: 'nora',
   });
@@ -357,7 +357,7 @@ test('adopting the same agent via either name form is idempotent', async (t) => 
   assert.equal(second.isError, undefined);
   assert.equal(adopted.length, 1);
   assert.equal(adopted[0].hcomName, 'waka');
-  assert.equal(JSON.parse(second.content[0].text).hcomName, 'waka');
+  assert.equal(JSON.parse(second.content[0].text).adopted[0].hcomName, 'waka');
 });
 
 // --- #12-B4: list_all resolves against the requested workspace ---
