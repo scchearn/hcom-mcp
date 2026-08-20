@@ -133,7 +133,8 @@ test('headless OpenCode resume runs the retained session directly and updates it
     'Send the final report.',
   ]);
   assert.equal(commandCalls[0].options.cwd, '/original/workspace');
-  assert.equal(commandCalls[0].options.timeoutMs, 0);
+  assert.equal(commandCalls[0].options.timeoutMs, undefined);
+  assert.ok(commandCalls[0].options.handoffTimeoutMs >= 300_000);
   assert.equal(commandCalls[0].options.env.HCOM_LAUNCHED, '1');
   assert.equal(commandCalls[0].options.env.HCOM_BACKGROUND, '1');
   assert.equal(commandCalls[0].options.env.HCOM_TOOL, 'opencode');
@@ -155,7 +156,7 @@ test('headless OpenCode resume runs the retained session directly and updates it
   assert.match(updates[0].update.dispatchAt, /^2026-/);
 });
 
-test('headless OpenCode resume records a terminal state when the process times out', async (t) => {
+test('headless OpenCode resume reports an inconclusive handoff without killing the process', async (t) => {
   const updates = [];
   const records = [sourceRecord()];
 
@@ -175,8 +176,9 @@ test('headless OpenCode resume records a terminal state when the process times o
       throw new Error(`unexpected hcom args: ${args.join(' ')}`);
     },
     execCommand: async (_command, _args, options) => {
-      assert.equal(options.timeoutMs, 0);
-      return { exitCode: -1, timedOut: true, stdout: '', stderr: 'timed out' };
+      assert.equal(options.timeoutMs, undefined);
+      assert.ok(options.handoffTimeoutMs >= 300_000);
+      return { exitCode: -1, handedOff: true, pid: 777, stdout: '', stderr: '' };
     },
     upsertResumedRecord: (id, update) => {
       updates.push({ id, update });
@@ -199,7 +201,56 @@ test('headless OpenCode resume records a terminal state when the process times o
   });
 
   assert.equal(response.isError, true);
-  assert.match(response.content[0].text, /E_LAUNCH_FAILED/);
+  assert.match(response.content[0].text, /E_RESUME_INCONCLUSIVE/);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].update.state, 'managed_stopped');
+});
+
+test('headless OpenCode resume rejects a run with no post-baseline agent report', async (t) => {
+  const updates = [];
+  const records = [sourceRecord()];
+
+  mockResumeDeps(t, {
+    records,
+    execHcom: async (args) => {
+      if (args[0] === 'list' && args[1] === '--stopped') {
+        return {
+          exitCode: 0,
+          stdout: 'Stopped: waka\n  Tool:       opencode\n  Directory:  /original/workspace\n  Session:    ses_retain123',
+          stderr: '',
+        };
+      }
+      if (args[0] === 'events' && args[2] === '1') {
+        return { exitCode: 0, stdout: '{"id":124700,"type":"status","instance":"waka","data":{"status":"listening"}}', stderr: '' };
+      }
+      if (args[0] === 'events' && args[2] === '100') {
+        return { exitCode: 0, stdout: '{"id":124700,"type":"message","instance":"waka","data":{"from":"waka","intent":"inform","text":"old report"}}', stderr: '' };
+      }
+      throw new Error(`unexpected hcom args: ${args.join(' ')}`);
+    },
+    execCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    upsertResumedRecord: (id, update) => {
+      updates.push({ id, update });
+      return { ...records[0], ...update, id };
+    },
+    addRecord: () => {
+      throw new Error('headless resume must update the retained record');
+    },
+  });
+
+  const { registerResumeForkTools } = await loadModule('tools/resume_fork.js');
+  const server = createFakeServer();
+  registerResumeForkTools(server);
+
+  const response = await server.handlers.get('resume')({
+    name: 'waka',
+    workspace: '/repo',
+    sender_name: 'nora',
+    headless: true,
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /E_RESUME_UNSUPPORTED/);
   assert.equal(updates.length, 1);
   assert.equal(updates[0].update.state, 'managed_stopped');
 });

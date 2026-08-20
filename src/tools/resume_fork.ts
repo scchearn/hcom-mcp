@@ -3,7 +3,15 @@ import { execCommand, execHcom, resolveCallerName } from "../hcom.js";
 import { addRecord, getOwnedRecordsByWorkspace, upsertResumedRecord } from "../registry.js";
 import { HarnessEnum } from "../types.js";
 import type { Harness, RegistryRecord } from "../types.js";
-import { E_INTERNAL, E_LAUNCH_FAILED, E_NO_SENDER, E_RESUME_UNSUPPORTED, internalError, toolError } from "../errors.js";
+import {
+  E_INTERNAL,
+  E_LAUNCH_FAILED,
+  E_NO_SENDER,
+  E_RESUME_INCONCLUSIVE,
+  E_RESUME_UNSUPPORTED,
+  internalError,
+  toolError,
+} from "../errors.js";
 import {
   eventBelongsTo,
   eventData,
@@ -15,6 +23,7 @@ import {
 } from "../events.js";
 
 const RESUME_CONSUMPTION_TIMEOUT_SEC = 60;
+const RESUME_HANDOFF_TIMEOUT_MS = 5 * 60 * 1000;
 const OPEN_CODE_SESSION_ID = /^ses_[A-Za-z0-9_-]+$/;
 const DEFAULT_OPEN_CODE_RESUME_PROMPT =
   "Continue from the current session and process any pending hcom messages.";
@@ -309,9 +318,9 @@ async function runHeadlessOpenCodeResume(
   const args = ["run", "--session", source.sessionId, "--format", "json", prompt];
   const result = await execCommandFn(command, args, {
     cwd: directory,
-    // opencode run is synchronous and may legitimately exceed the hcom event
-    // gate. Never kill the resumed turn on an arbitrary wall-clock deadline.
-    timeoutMs: 0,
+    // Stream the synchronous run and hand it back alive after a generous
+    // caller-visible ceiling instead of killing a legitimate long turn.
+    handoffTimeoutMs: RESUME_HANDOFF_TIMEOUT_MS,
     env: {
       HCOM_LAUNCHED: "1",
       HCOM_BACKGROUND: "1",
@@ -334,6 +343,14 @@ async function runHeadlessOpenCodeResume(
     dispatchAt: new Date(startedAtMs).toISOString(),
   });
   if (!record) return toolError(E_LAUNCH_FAILED, `Retained ownership record "${source.record.id}" disappeared during resume.`);
+
+  if (result.handedOff) {
+    const processDetail = result.pid ? ` Process ${result.pid} was left running.` : " The process was left running.";
+    return toolError(
+      E_RESUME_INCONCLUSIVE,
+      `Headless OpenCode resume exceeded the ${RESUME_HANDOFF_TIMEOUT_MS / 1000}-second handoff wait without completing; no success was claimed.${processDetail} The retained record was settled as ${record.state}.`,
+    );
+  }
 
   if (result.exitCode !== 0 || result.timedOut) {
     return toolError(
