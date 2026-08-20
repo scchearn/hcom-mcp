@@ -9,6 +9,7 @@ import {
   type OwnershipState,
   type Harness,
   type HcomAgent,
+  type LaunchMode,
 } from "./types.js";
 
 export const REGISTRY_DIR = join(homedir(), ".hcom", "mcp");
@@ -218,6 +219,52 @@ export function updateRecordHcomInfo(
   if (!record) return null;
   record.hcomName = hcomName;
   if (sessionId) record.sessionId = sessionId;
+  record.lastSeenAt = new Date().toISOString();
+  saveRegistry(registry);
+  return record;
+}
+
+/**
+ * Reconcile a resumed agent into its retained ownership record.
+ *
+ * Resume keeps the hcom identity, so appending a second record for the same
+ * name/session makes lifecycle ownership ambiguous. Update the source record
+ * atomically and remove unreleased duplicates in the same workspace.
+ */
+export function upsertResumedRecord(
+  id: string,
+  updates: {
+    hcomName?: string;
+    sessionId?: string;
+    launchMode?: LaunchMode;
+    state?: OwnershipState;
+    resumedFrom?: string;
+  },
+): RegistryRecord | null {
+  const registry = loadRegistry();
+  const record = registry.records.find((candidate) => candidate.id === id);
+  if (!record) return null;
+
+  const duplicateIds = new Set(
+    registry.records
+      .filter((candidate) => {
+        if (candidate.id === id || candidate.released || candidate.workspace !== record.workspace) {
+          return false;
+        }
+        return Boolean(
+          (updates.hcomName && candidate.hcomName === updates.hcomName) ||
+          (updates.sessionId && candidate.sessionId === updates.sessionId),
+        );
+      })
+      .map((candidate) => candidate.id),
+  );
+
+  if (duplicateIds.size > 0) {
+    registry.records = registry.records.filter((candidate) => !duplicateIds.has(candidate.id));
+  }
+
+  Object.assign(record, updates);
+  record.released = false;
   record.lastSeenAt = new Date().toISOString();
   saveRegistry(registry);
   return record;

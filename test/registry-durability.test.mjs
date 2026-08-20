@@ -46,6 +46,40 @@ test('addRecord writes atomically: no tmp file left, valid JSON on disk', async 
   assert.equal(parsed.records[0].hcomName, 'waka');
 });
 
+test('upsertResumedRecord updates the retained record and removes live duplicates', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'hcom-reg-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  t.mock.module('node:os', { namedExports: { homedir: () => home } });
+
+  const reg = await loadRegistryModule();
+  const registryPath = join(home, '.hcom', 'mcp', 'registry.json');
+  realFs.mkdirSync(join(home, '.hcom', 'mcp'), { recursive: true });
+  writeFileSync(
+    registryPath,
+    JSON.stringify({
+      records: [
+        makeRecord({ id: 'source', state: 'managed_stopped' }),
+        makeRecord({ id: 'duplicate', state: 'managed_active' }),
+      ],
+    }),
+    'utf-8',
+  );
+
+  const resumed = reg.upsertResumedRecord('source', {
+    hcomName: 'waka',
+    sessionId: 'ses_retain123',
+    state: 'managed_active',
+    launchMode: 'headless',
+    resumedFrom: 'waka',
+  });
+
+  assert.equal(resumed.id, 'source');
+  assert.equal(resumed.sessionId, 'ses_retain123');
+  const parsed = JSON.parse(readFileSync(registryPath, 'utf-8'));
+  assert.deepEqual(parsed.records.map((record) => record.id), ['source']);
+  assert.equal(parsed.records[0].state, 'managed_active');
+});
+
 test('addRecord survives a failed rename without touching the live file', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'hcom-reg-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
