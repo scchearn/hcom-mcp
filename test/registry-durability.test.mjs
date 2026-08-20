@@ -46,7 +46,7 @@ test('addRecord writes atomically: no tmp file left, valid JSON on disk', async 
   assert.equal(parsed.records[0].hcomName, 'waka');
 });
 
-test('upsertResumedRecord updates the retained record and removes live duplicates', async (t) => {
+test('upsertResumedRecord updates the retained record and releases same-session duplicates', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'hcom-reg-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   t.mock.module('node:os', { namedExports: { homedir: () => home } });
@@ -59,7 +59,7 @@ test('upsertResumedRecord updates the retained record and removes live duplicate
     JSON.stringify({
       records: [
         makeRecord({ id: 'source', state: 'managed_stopped' }),
-        makeRecord({ id: 'duplicate', state: 'managed_active' }),
+        makeRecord({ id: 'duplicate', state: 'managed_active', sessionId: 'ses_retain123' }),
       ],
     }),
     'utf-8',
@@ -76,8 +76,42 @@ test('upsertResumedRecord updates the retained record and removes live duplicate
   assert.equal(resumed.id, 'source');
   assert.equal(resumed.sessionId, 'ses_retain123');
   const parsed = JSON.parse(readFileSync(registryPath, 'utf-8'));
-  assert.deepEqual(parsed.records.map((record) => record.id), ['source']);
+  assert.deepEqual(parsed.records.map((record) => record.id), ['source', 'duplicate']);
   assert.equal(parsed.records[0].state, 'managed_active');
+  assert.equal(parsed.records[1].released, true);
+});
+
+test('upsertResumedRecord preserves a newer recycled-name record with a different session', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'hcom-reg-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  t.mock.module('node:os', { namedExports: { homedir: () => home } });
+
+  const reg = await loadRegistryModule();
+  const registryPath = join(home, '.hcom', 'mcp', 'registry.json');
+  realFs.mkdirSync(join(home, '.hcom', 'mcp'), { recursive: true });
+  writeFileSync(
+    registryPath,
+    JSON.stringify({
+      records: [
+        makeRecord({ id: 'old-source', state: 'managed_stopped', sessionId: 'ses_old', lastSeenAt: '2026-08-01T00:00:00.000Z' }),
+        makeRecord({ id: 'new-live', state: 'managed_active', sessionId: 'ses_new', lastSeenAt: '2026-08-20T00:00:00.000Z' }),
+      ],
+    }),
+    'utf-8',
+  );
+
+  reg.upsertResumedRecord('old-source', {
+    hcomName: 'waka',
+    sessionId: 'ses_old',
+    state: 'managed_stopped',
+    launchMode: 'headless',
+  });
+
+  const parsed = JSON.parse(readFileSync(registryPath, 'utf-8'));
+  const newer = parsed.records.find((record) => record.id === 'new-live');
+  assert.equal(newer.released, false);
+  assert.equal(newer.state, 'managed_active');
+  assert.equal(parsed.records.length, 2);
 });
 
 test('addRecord survives a failed rename without touching the live file', async (t) => {

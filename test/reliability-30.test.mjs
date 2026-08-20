@@ -74,10 +74,14 @@ test('headless OpenCode resume runs the retained session directly and updates it
         };
       }
       if (args[0] === 'events' && args[2] === '1') {
-        return { exitCode: 0, stdout: '{"id":10,"type":"status","instance":"waka","data":{"status":"listening"}}', stderr: '' };
+        return { exitCode: 0, stdout: '{"id":124700,"type":"status","instance":"waka","ts":"2026-08-20T00:00:00","data":{"status":"listening"}}', stderr: '' };
       }
       if (args[0] === 'events' && args[2] === '100') {
-        return { exitCode: 0, stdout: '{"id":11,"type":"status","instance":"waka","data":{"status":"active"}}', stderr: '' };
+        return {
+          exitCode: 0,
+          stdout: '{"id":124701,"type":"message","instance":"waka","ts":"2026-08-20T00:00:02","data":{"from":"waka","intent":"inform","text":"report sent"}}',
+          stderr: '',
+        };
       }
       throw new Error(`unexpected hcom args: ${args.join(' ')}`);
     },
@@ -129,25 +133,82 @@ test('headless OpenCode resume runs the retained session directly and updates it
     'Send the final report.',
   ]);
   assert.equal(commandCalls[0].options.cwd, '/original/workspace');
+  assert.equal(commandCalls[0].options.timeoutMs, 0);
   assert.equal(commandCalls[0].options.env.HCOM_LAUNCHED, '1');
   assert.equal(commandCalls[0].options.env.HCOM_BACKGROUND, '1');
   assert.equal(commandCalls[0].options.env.HCOM_TOOL, 'opencode');
   assert.equal(commandCalls[0].options.env.HCOM_INSTANCE_NAME, 'waka');
   assert.match(commandCalls[0].options.env.HCOM_PROCESS_ID, /^hcom-mcp-resume-waka-/);
   assert.equal(calls.some((args) => args[0] === 'r'), false);
-  assert.equal(calls.some((args) => args[0] === 'events'), false);
+  assert.ok(calls.some((args) => args[0] === 'events'));
   assert.equal(updates.length, 1);
   assert.equal(updates[0].id, 'rec-source');
   assert.deepEqual({ ...updates[0].update, dispatchAt: undefined }, {
     hcomName: 'waka',
     sessionId: 'ses_retain123',
-    state: 'managed_active',
+    state: 'managed_stopped',
     launchMode: 'headless',
     resumedFrom: 'waka',
     requireReport: false,
     dispatchAt: undefined,
   });
   assert.match(updates[0].update.dispatchAt, /^2026-/);
+});
+
+test('headless OpenCode resume records a terminal state when the process times out', async (t) => {
+  const updates = [];
+  const records = [sourceRecord()];
+
+  mockResumeDeps(t, {
+    records,
+    execHcom: async (args) => {
+      if (args[0] === 'list' && args[1] === '--stopped') {
+        return {
+          exitCode: 0,
+          stdout: 'Stopped: waka\n  Tool:       opencode\n  Directory:  /original/workspace\n  Session:    ses_retain123',
+          stderr: '',
+        };
+      }
+      if (args[0] === 'events') {
+        return { exitCode: 0, stdout: '{"id":124700,"type":"status","instance":"waka","ts":"2026-08-20T00:00:00","data":{"status":"listening"}}', stderr: '' };
+      }
+      throw new Error(`unexpected hcom args: ${args.join(' ')}`);
+    },
+    execCommand: async (_command, _args, options) => {
+      assert.equal(options.timeoutMs, 0);
+      return { exitCode: -1, timedOut: true, stdout: '', stderr: 'timed out' };
+    },
+    upsertResumedRecord: (id, update) => {
+      updates.push({ id, update });
+      return { ...records[0], ...update, id };
+    },
+    addRecord: () => {
+      throw new Error('headless resume must update the retained record');
+    },
+  });
+
+  const { registerResumeForkTools } = await loadModule('tools/resume_fork.js');
+  const server = createFakeServer();
+  registerResumeForkTools(server);
+
+  const response = await server.handlers.get('resume')({
+    name: 'waka',
+    workspace: '/repo',
+    sender_name: 'nora',
+    headless: true,
+  });
+
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /E_LAUNCH_FAILED/);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].update.state, 'managed_stopped');
+});
+
+test('headless OpenCode resume reports Windows executable support explicitly', async () => {
+  const { getOpenCodeResumeCommand } = await loadModule('tools/resume_fork.js');
+
+  assert.equal(getOpenCodeResumeCommand('linux'), 'opencode');
+  assert.equal(getOpenCodeResumeCommand('win32'), null);
 });
 
 test('headless OpenCode resume refuses when no retained session id is available', async (t) => {

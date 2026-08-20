@@ -53,6 +53,20 @@ function mockLifecycleDeps(t, { records, liveAgents, execHcom }) {
   });
 }
 
+function event(type, ts, from, intent = undefined) {
+  return {
+    id: 124700,
+    instance: from,
+    ts,
+    type,
+    data: {
+      from,
+      ...(intent ? { intent } : {}),
+      text: from === 'waka' ? 'final report' : 'task dispatch',
+    },
+  };
+}
+
 test('stop refuses a report-promising worker without a post-dispatch message', async (t) => {
   const calls = [];
   mockLifecycleDeps(t, {
@@ -60,14 +74,17 @@ test('stop refuses a report-promising worker without a post-dispatch message', a
     liveAgents: [{ name: 'waka', base_name: 'waka', status: 'listening' }],
     execHcom: async (args) => {
       calls.push(args);
-      if (args[0] === 'events') {
+      if (args.includes('--mention')) {
         return {
           exitCode: 0,
-          stdout: JSON.stringify({
-            type: 'message',
-            ts: '2026-08-19T23:59:59.000Z',
-            data: { from: 'other', text: 'not the worker report' },
-          }),
+          stdout: JSON.stringify(event('message', '2026-08-20T00:00:01', 'rira', 'request')),
+          stderr: '',
+        };
+      }
+      if (args.includes('--agent')) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(event('message', '2026-08-19T23:59:59', 'other')),
           stderr: '',
         };
       }
@@ -97,14 +114,17 @@ test('kill accepts an agent-originated message after dispatch', async (t) => {
     liveAgents: [{ name: 'waka', base_name: 'waka', status: 'listening' }],
     execHcom: async (args) => {
       calls.push(args);
-      if (args[0] === 'events') {
+      if (args.includes('--mention')) {
         return {
           exitCode: 0,
-          stdout: JSON.stringify({
-            type: 'message',
-            ts: '2026-08-20T00:00:01.000Z',
-            data: { from: 'waka', text: 'final report' },
-          }),
+          stdout: JSON.stringify(event('message', '2026-08-20T00:00:01', 'rira', 'request')),
+          stderr: '',
+        };
+      }
+      if (args.includes('--agent')) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(event('message', '2026-08-20T00:00:02', 'waka', 'inform')),
           stderr: '',
         };
       }
@@ -124,6 +144,9 @@ test('kill accepts an agent-originated message after dispatch', async (t) => {
   assert.equal(response.isError, undefined);
   const payload = JSON.parse(response.content[0].text);
   assert.equal(payload.killed, 1);
+  assert.ok(calls.some((args) => args.includes('--mention') && args.includes('waka')));
+  assert.ok(calls.some((args) => args.includes('--agent') && args.includes('waka')));
+  assert.equal(calls.some((args) => args.includes('--mention') && args.includes('--agent')), false);
   assert.deepEqual(calls.find((args) => args[0] === 'kill'), ['kill', 'waka', '--go']);
 });
 
@@ -180,6 +203,6 @@ test('tag teardown applies the report gate to every owned target', async (t) => 
   const payload = JSON.parse(response.content[0].text);
   assert.equal(payload.stopped, 0);
   assert.equal(payload.failed, 2);
-  assert.equal(calls.filter((args) => args[0] === 'events').length, 2);
+  assert.equal(calls.filter((args) => args[0] === 'events').length, 4);
   assert.equal(calls.some((args) => args[0] === 'stop'), false);
 });

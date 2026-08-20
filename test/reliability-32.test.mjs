@@ -28,10 +28,12 @@ function record() {
     createdAt: '2026-08-20T00:00:00.000Z',
     lastSeenAt: '2026-08-20T00:00:00.000Z',
     released: false,
+    requireReport: true,
+    dispatchAt: '2026-08-20T00:00:00.000Z',
   };
 }
 
-function mockWatchDeps(t, { events, unreadCount = 0, execHcom }) {
+function mockWatchDeps(t, { agentEvents, inboundEvents, unreadCount = 0, execHcom }) {
   t.mock.module('../dist/hcom.js', {
     namedExports: {
       canonicalizeAgentName: (name) => name.replace(/^@/, ''),
@@ -56,32 +58,40 @@ function mockWatchDeps(t, { events, unreadCount = 0, execHcom }) {
       getOwnedRecordsByWorkspace: () => [record()],
     },
   });
-  return events;
+  return { agentEvents, inboundEvents };
 }
 
 test('watch_agents flags an OpenCode queue wedged for exactly 600 seconds and fetches term only then', async (t) => {
-  const dispatchAt = new Date(Date.now() - 600_000).toISOString();
+  const dispatchAt = new Date(Date.now() - 600_000).toISOString().slice(0, 19);
   const calls = [];
-  const events = [
+  const inboundEvents = [
     {
-      type: 'status',
-      instance: 'waka',
-      ts: new Date().toISOString(),
-      data: { status: 'listening', context: 'idle' },
-    },
-    {
-      type: 'message',
-      instance: 'hub',
+      id: 124623,
+      instance: 'rira',
       ts: dispatchAt,
-      data: { from: 'hub', intent: 'request', text: 'process the queued task' },
+      type: 'message',
+      data: { from: 'rira', intent: 'request', text: 'process the queued task' },
+    },
+  ];
+  const agentEvents = [
+    {
+      id: 124624,
+      instance: 'waka',
+      ts: new Date().toISOString().slice(0, 19),
+      type: 'status',
+      data: { status: 'listening', context: 'idle', new_status: 'listening', new_context: 'idle' },
     },
   ];
   mockWatchDeps(t, {
-    events,
+    agentEvents,
+    inboundEvents,
     execHcom: async (args) => {
       calls.push(args);
-      if (args[0] === 'events') {
-        return { exitCode: 0, stdout: events.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
+      if (args[0] === 'events' && args.includes('--mention')) {
+        return { exitCode: 0, stdout: inboundEvents.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
+      }
+      if (args[0] === 'events' && args.includes('--agent')) {
+        return { exitCode: 0, stdout: agentEvents.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
       }
       if (args[0] === 'term') {
         return { exitCode: 0, stdout: JSON.stringify({ lines: ['queued prompt', 'listening'] }), stderr: '' };
@@ -100,29 +110,40 @@ test('watch_agents flags an OpenCode queue wedged for exactly 600 seconds and fe
   const agent = payload.agents[0];
   assert.ok(agent.flags.includes('wedged_queue'));
   assert.equal(agent.wedgedQueue.evidenceTimestamp, dispatchAt);
+  assert.equal(agent.wedgedQueue.dispatchIntent, 'request');
   assert.ok(agent.wedgedQueue.ageSeconds >= 600);
   assert.match(agent.wedgedQueue.termTail, /listening/);
   assert.equal(payload.summary.wedged_queue, 1);
   assert.equal(calls.filter((args) => args[0] === 'term').length, 1);
   assert.equal(calls.some((args) => args[0] === 'stop' || args[0] === 'kill'), false);
+  assert.ok(calls.some((args) => args.includes('--mention') && args.includes('waka')));
+  assert.ok(calls.some((args) => args.includes('--agent') && args.includes('waka')));
+  assert.equal(calls.some((args) => args.includes('--mention') && args.includes('--agent')), false);
+  assert.equal(agent.report.required, true);
 });
 
-test('watch_agents ignores non-actionable inform and ack traffic even when unread_count is nonzero', async (t) => {
-  const old = new Date(Date.now() - 900_000).toISOString();
+test('watch_agents treats old inbound inform as a candidate but ignores ack traffic', async (t) => {
+  const old = new Date(Date.now() - 900_000).toISOString().slice(0, 19);
   const calls = [];
-  const events = [
-    { type: 'message', instance: 'hub', ts: old, data: { from: 'hub', intent: 'inform', text: 'FYI' } },
-    { type: 'message', instance: 'hub', ts: old, data: { from: 'hub', intent: 'ack', text: 'acknowledged' } },
+  const inboundEvents = [
+    { id: 124630, type: 'message', instance: 'rira', ts: old, data: { from: 'rira', intent: 'inform', text: 'FYI' } },
+    { id: 124631, type: 'message', instance: 'rira', ts: old, data: { from: 'rira', intent: 'ack', text: 'acknowledged' } },
   ];
+  const agentEvents = [];
   mockWatchDeps(t, {
-    events,
+    agentEvents,
+    inboundEvents,
     unreadCount: 3,
     execHcom: async (args) => {
       calls.push(args);
-      if (args[0] === 'events') {
-        return { exitCode: 0, stdout: events.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
+      if (args[0] === 'events' && args.includes('--mention')) {
+        return { exitCode: 0, stdout: inboundEvents.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
       }
-      throw new Error(`term must not run for a non-wedged queue: ${args.join(' ')}`);
+      if (args[0] === 'events' && args.includes('--agent')) {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'term') return { exitCode: 0, stdout: JSON.stringify({ lines: ['listening'] }), stderr: '' };
+      throw new Error(`unexpected args: ${args.join(' ')}`);
     },
   });
 
@@ -132,25 +153,32 @@ test('watch_agents ignores non-actionable inform and ack traffic even when unrea
   const response = await server.handlers.get('watch_agents')({ workspace: '/repo' });
   const agent = JSON.parse(response.content[0].text).agents[0];
 
-  assert.equal(agent.flags.includes('wedged_queue'), false);
+  assert.equal(agent.flags.includes('wedged_queue'), true);
+  assert.equal(agent.wedgedQueue.dispatchIntent, 'inform');
   assert.equal(agent.flags.includes('unreported'), true);
-  assert.equal(calls.some((args) => args[0] === 'term'), false);
+  assert.equal(calls.some((args) => args[0] === 'term'), true);
 });
 
 test('watch_agents clears wedged_queue when the agent replies after dispatch', async (t) => {
-  const old = new Date(Date.now() - 900_000).toISOString();
-  const reply = new Date().toISOString();
+  const old = new Date(Date.now() - 900_000).toISOString().slice(0, 19);
+  const reply = new Date().toISOString().slice(0, 19);
   const calls = [];
-  const events = [
-    { type: 'message', instance: 'hub', ts: old, data: { from: 'hub', intent: 'request', text: 'do work' } },
-    { type: 'message', instance: 'waka', ts: reply, data: { from: 'waka', intent: 'ack', text: 'received' } },
+  const inboundEvents = [
+    { id: 124640, type: 'message', instance: 'rira', ts: old, data: { from: 'rira', intent: 'request', text: 'do work' } },
+  ];
+  const agentEvents = [
+    { id: 124641, type: 'message', instance: 'waka', ts: reply, data: { from: 'waka', intent: 'inform', text: 'received' } },
   ];
   mockWatchDeps(t, {
-    events,
+    agentEvents,
+    inboundEvents,
     execHcom: async (args) => {
       calls.push(args);
-      if (args[0] === 'events') {
-        return { exitCode: 0, stdout: events.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
+      if (args[0] === 'events' && args.includes('--mention')) {
+        return { exitCode: 0, stdout: inboundEvents.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
+      }
+      if (args[0] === 'events' && args.includes('--agent')) {
+        return { exitCode: 0, stdout: agentEvents.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
       }
       throw new Error(`term must not run after consumption evidence: ${args.join(' ')}`);
     },
@@ -167,19 +195,25 @@ test('watch_agents clears wedged_queue when the agent replies after dispatch', a
 });
 
 test('watch_agents clears wedged_queue when post-dispatch activity proves consumption', async (t) => {
-  const old = new Date(Date.now() - 900_000).toISOString();
-  const active = new Date(Date.now() - 899_000).toISOString();
+  const old = new Date(Date.now() - 900_000).toISOString().slice(0, 19);
+  const active = new Date(Date.now() - 899_000).toISOString().slice(0, 19);
   const calls = [];
-  const events = [
-    { type: 'message', instance: 'hub', ts: old, data: { from: 'hub', intent: 'request', text: 'do work' } },
-    { type: 'status', instance: 'waka', ts: active, data: { new_status: 'active', new_context: 'tool:read' } },
+  const inboundEvents = [
+    { id: 124650, type: 'message', instance: 'rira', ts: old, data: { from: 'rira', intent: 'request', text: 'do work' } },
+  ];
+  const agentEvents = [
+    { id: 124651, type: 'status', instance: 'waka', ts: active, data: { status: 'active', context: 'tool:read', new_status: 'active', new_context: 'tool:read' } },
   ];
   mockWatchDeps(t, {
-    events,
+    agentEvents,
+    inboundEvents,
     execHcom: async (args) => {
       calls.push(args);
-      if (args[0] === 'events') {
-        return { exitCode: 0, stdout: events.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
+      if (args[0] === 'events' && args.includes('--mention')) {
+        return { exitCode: 0, stdout: inboundEvents.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
+      }
+      if (args[0] === 'events' && args.includes('--agent')) {
+        return { exitCode: 0, stdout: agentEvents.map((event) => JSON.stringify(event)).join('\n'), stderr: '' };
       }
       throw new Error(`term must not run after activity evidence: ${args.join(' ')}`);
     },
