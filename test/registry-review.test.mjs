@@ -57,6 +57,7 @@ test('prune expired+confirm aborts when a kill fails, leaving records intact', a
   let confirmCalled = false;
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      canonicalizeAgentName: (name) => name,
       execHcom: async (args) => {
         if (args[0] === 'kill') {
           killTargets.push(args[1]);
@@ -67,6 +68,9 @@ test('prune expired+confirm aborts when a kill fails, leaving records intact', a
         }
         throw new Error(`unexpected args: ${args.join(' ')}`);
       },
+      findLiveAgentByIdentifier: () => null,
+      listHcomAgents: async () => [],
+      resolveCallerName: async (override) => override,
     },
   });
   t.mock.module('../dist/registry.js', {
@@ -84,6 +88,9 @@ test('prune expired+confirm aborts when a kill fails, leaving records intact', a
           ],
         };
       },
+      getOwnedRecordsByWorkspace: () => [],
+      removeRecords: () => null,
+      updateRecordState: () => null,
     },
   });
 
@@ -112,11 +119,111 @@ test('prune expired+confirm aborts when a kill fails, leaving records intact', a
   assert.deepEqual(killTargets, ['waka', 'zama']);
 });
 
+test('prune expired refuses a report-promising record with structured gate evidence', async (t) => {
+  let teardownOptions;
+  let removedIds;
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      listHcomAgents: async () => [{ name: 'waka', base_name: 'waka', status: 'listening' }],
+    },
+  });
+  t.mock.module('../dist/tools/lifecycle.js', {
+    namedExports: {
+      runTeardown: async (_targets, _action, options) => {
+        teardownOptions = options;
+        return [{ name: 'waka', ok: false, text: '[E_REPORT_REQUIRED] report missing' }];
+      },
+    },
+  });
+  t.mock.module('../dist/registry.js', {
+    namedExports: {
+      pruneRecords: async (_workspace, options) => options.confirm
+        ? { removed: [], wouldRemove: [] }
+        : { removed: [], wouldRemove: [{ id: 'expired-1', hcomName: 'waka', state: 'managed_expired' }] },
+      removeRecords: (ids) => { removedIds = ids; },
+    },
+  });
+
+  const { registerPruneTool } = await import(`../dist/tools/prune.js?${importCounter++}`);
+  const server = {
+    handlers: new Map(),
+    tool(name, _desc, _schema, handler) {
+      this.handlers.set(name, handler);
+    },
+  };
+  registerPruneTool(server);
+
+  const response = await server.handlers.get('prune')({
+    workspace: '/repo',
+    expired: true,
+    confirm: true,
+  });
+
+  assert.equal(response.isError, true);
+  const payload = JSON.parse(response.content[0].text);
+  assert.deepEqual(payload.skipped, ['[E_REPORT_REQUIRED] report missing']);
+  assert.equal(payload.teardown[0].ok, false);
+  assert.equal(teardownOptions.force, false);
+  assert.equal(removedIds, undefined);
+});
+
+test('prune expired force path kills and clears report-promising records intentionally', async (t) => {
+  let teardownOptions;
+  let removedIds;
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      execHcom: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      listHcomAgents: async () => [{ name: 'waka', base_name: 'waka', status: 'listening' }],
+    },
+  });
+  t.mock.module('../dist/tools/lifecycle.js', {
+    namedExports: {
+      runTeardown: async (_targets, _action, options) => {
+        teardownOptions = options;
+        return [{ name: 'waka', ok: true, text: 'Killed agent "waka".' }];
+      },
+    },
+  });
+  t.mock.module('../dist/registry.js', {
+    namedExports: {
+      pruneRecords: async () => ({ removed: [], wouldRemove: [{ id: 'expired-1', hcomName: 'waka', state: 'managed_expired' }] }),
+      removeRecords: (ids) => { removedIds = ids; },
+    },
+  });
+
+  const { registerPruneTool } = await import(`../dist/tools/prune.js?${importCounter++}`);
+  const server = {
+    handlers: new Map(),
+    tool(name, _desc, _schema, handler) {
+      this.handlers.set(name, handler);
+    },
+  };
+  registerPruneTool(server);
+
+  const response = await server.handlers.get('prune')({
+    workspace: '/repo',
+    expired: true,
+    confirm: true,
+    force: true,
+  });
+
+  assert.equal(response.isError, undefined);
+  const payload = JSON.parse(response.content[0].text);
+  assert.deepEqual(payload.killed, ['waka']);
+  assert.deepEqual(removedIds, ['expired-1']);
+  assert.equal(teardownOptions.force, true);
+});
+
 test('prune tool resolves the deprecated olderThanDays alias at the tool surface', async (t) => {
   const received = [];
   t.mock.module('../dist/hcom.js', {
     namedExports: {
+      canonicalizeAgentName: (name) => name,
       execHcom: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      findLiveAgentByIdentifier: () => null,
+      listHcomAgents: async () => [],
+      resolveCallerName: async (override) => override,
     },
   });
   t.mock.module('../dist/registry.js', {
@@ -125,6 +232,9 @@ test('prune tool resolves the deprecated olderThanDays alias at the tool surface
         received.push(options);
         return { removed: [], wouldRemove: [] };
       },
+      getOwnedRecordsByWorkspace: () => [],
+      removeRecords: () => null,
+      updateRecordState: () => null,
     },
   });
 
@@ -178,4 +288,3 @@ test('legacy string-harness presets pass ttlMinutes through normalization', asyn
   const config = loadGlobalConfig('/repo');
   assert.equal(config.agentPresets.ephemeral.ttlMinutes, 30);
 });
-

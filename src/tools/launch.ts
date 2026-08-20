@@ -180,9 +180,10 @@ export function registerLaunchTool(server: any) {
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
       sender_name: z.string().optional().describe("Sender identity recorded as the launcher. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
       reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored — a reasoningNote is returned on the result)"),
+      require_report: z.boolean().optional().default(false).describe("Require an agent-originated report before stop/kill; force=true can override the close gate (default: false)."),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, count, workspace, sender_name, reasoning, ttl_minutes }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, count, workspace, sender_name, reasoning, ttl_minutes, require_report }: {
       harness: Harness;
       preset?: string;
       model?: string;
@@ -194,6 +195,7 @@ export function registerLaunchTool(server: any) {
       sender_name?: string;
       reasoning?: string;
       ttl_minutes?: number;
+      require_report?: boolean;
     }) => {
       const cwd = workspace ?? process.cwd();
 
@@ -253,7 +255,7 @@ export function registerLaunchTool(server: any) {
           // Resolve effective prompt upstream
           resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
 
-          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, count ?? 1);
+          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, count ?? 1, require_report ?? false);
           return {
             content: [{
               type: "text" as const,
@@ -276,7 +278,7 @@ export function registerLaunchTool(server: any) {
             ttlMinutes: ttl_minutes,
           };
 
-          const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName, count ?? 1);
+          const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName, count ?? 1, require_report ?? false);
           return {
             content: [{
               type: "text" as const,
@@ -305,14 +307,16 @@ export function registerTopologyLaunchTool(server: any) {
       verify: z.boolean().optional().describe("Gate each launched agent on readiness and report outcomes (default: false)"),
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness when verify=true (default: 60)"),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes, applied to every role in the batch: records expire after this and prune expired=true kills + clears them. Overrides per-preset ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
+      require_report: z.boolean().optional().default(false).describe("Require an agent-originated report before stop/kill for every launched role; force=true can override the close gate (default: false)."),
     },
-    async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec, ttl_minutes }: {
+    async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec, ttl_minutes, require_report }: {
       topology: string;
       workspace?: string;
       sender_name?: string;
       verify?: boolean;
       ready_timeout_sec?: number;
       ttl_minutes?: number;
+      require_report?: boolean;
     }) => {
       const cwd = workspace ?? process.cwd();
 
@@ -381,7 +385,7 @@ export function registerTopologyLaunchTool(server: any) {
           try {
             // Batch-level TTL applies to every role when set on the topology call.
             if (ttl_minutes) resolved.ttlMinutes = ttl_minutes;
-            const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache, callerName);
+            const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache, callerName, 1, require_report ?? false);
             launched.push(result);
             registryIds.push(...result.registryIds);
 
@@ -440,7 +444,8 @@ export async function launchAgent(
   workspace: string,
   catalogCache: ModelCatalogCache = new Map(),
   launchedBy?: string,
-  count: number = 1
+  count: number = 1,
+  requireReport: boolean = false,
 ): Promise<LaunchResult> {
   const validationError = await validatePresetModelAvailability(preset, catalogCache);
   if (validationError) {
@@ -550,6 +555,7 @@ export async function launchAgent(
     execOptions.env = { OPENCODE_CONFIG_CONTENT: JSON.stringify(configContent) };
   }
 
+  const dispatchAt = new Date().toISOString();
   const result = await execHcom(args, execOptions);
 
   // Parse output for agent names. hcom prints "Names: aaaa bbbb ..." and
@@ -584,6 +590,8 @@ export async function launchAgent(
       state: classifyLaunchState(result.exitCode),
       released: false,
       launchedBy,
+      requireReport,
+      dispatchAt,
       expiresAt,
     })
   );
@@ -826,7 +834,7 @@ export function registerSpawnAndVerifyTool(server: any) {
       on_blocked: z.enum(["report", "rescue"]).optional().describe("What to do when the agent is blocked on user attention (default: report)"),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked, ttl_minutes }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked, ttl_minutes, require_report }: {
       harness: Harness;
       preset?: string;
       model?: string;
@@ -839,6 +847,7 @@ export function registerSpawnAndVerifyTool(server: any) {
       ready_timeout_sec?: number;
       on_blocked?: "report" | "rescue";
       ttl_minutes?: number;
+      require_report?: boolean;
     }) => {
       const cwd = workspace ?? process.cwd();
       const readyTimeoutSec = ready_timeout_sec ?? 60;
@@ -898,7 +907,7 @@ export function registerSpawnAndVerifyTool(server: any) {
           };
         }
 
-        const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName);
+        const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, 1, require_report ?? false);
 
         const outcomes: VerifyOutcome[] = [];
         for (const [index, name] of result.hcomNames.entries()) {

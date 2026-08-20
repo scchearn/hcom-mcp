@@ -526,10 +526,13 @@ function mockResumeForkDeps(t, { execHcom }) {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: execHcom,
+      execCommand: async () => ({ exitCode: 1, stdout: '', stderr: 'unexpected direct command' }),
     },
   });
   t.mock.module('../dist/registry.js', {
     namedExports: {
+      getOwnedRecordsByWorkspace: () => [],
+      upsertResumedRecord: () => ({ id: 'rec-new' }),
       addRecord: (record) => ({ ...record, id: 'rec-new' }),
     },
   });
@@ -540,6 +543,9 @@ test('resume registers a record with resumedFrom and runs hcom r', async (t) => 
   mockResumeForkDeps(t, {
     execHcom: async (args) => {
       calls.push(args);
+      if (args[0] === 'events' && args[1] === '--last' && args[2] === '100') {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 11, ts: new Date().toISOString(), type: 'status', instance: 'waka', data: { status: 'active' } }), stderr: '' };
+      }
       return { exitCode: 0, stdout: 'Names: waka\n', stderr: '' };
     },
   });
@@ -617,10 +623,13 @@ test('resume reports hcom failure without registering a record', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async () => ({ exitCode: 1, stdout: '', stderr: 'target not found' }),
+      execCommand: async () => ({ exitCode: 1, stdout: '', stderr: 'unexpected direct command' }),
     },
   });
   t.mock.module('../dist/registry.js', {
     namedExports: {
+      getOwnedRecordsByWorkspace: () => [],
+      upsertResumedRecord: () => ({ id: 'rec-new' }),
       addRecord: () => {
         addCalls += 1;
         return { id: 'rec-new' };

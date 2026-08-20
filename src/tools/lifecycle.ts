@@ -1,18 +1,22 @@
 import { z } from "zod";
-import {
-  canonicalizeAgentName,
-  execHcom,
-  findLiveAgentByIdentifier,
-  listHcomAgents,
-  resolveCallerName,
-} from "../hcom.js";
-import { getOwnedRecordsByWorkspace, updateRecordState } from "../registry.js";
+import * as hcom from "../hcom.js";
+import * as registry from "../registry.js";
 import type { RegistryRecord, HcomAgent } from "../types.js";
+import {
+  eventTimeMs,
+  eventTimestamp,
+  isAgentMessageEvent,
+  isInboundDispatchEvent,
+  messageFields,
+  newestEvent,
+  parseHcomEvents,
+} from "../events.js";
 import {
   E_AGENT_NOT_FOUND,
   E_KILL_FAILED,
   E_NO_SENDER,
   E_NOT_MANAGED,
+  E_REPORT_REQUIRED,
   E_SELF_PROTECTION,
   E_STOP_FAILED,
   E_TARGET_REQUIRED,
@@ -20,9 +24,97 @@ import {
   toolError,
 } from "../errors.js";
 
+const { canonicalizeAgentName, execHcom, findLiveAgentByIdentifier, listHcomAgents, resolveCallerName } = hcom;
+const { getOwnedRecordsByWorkspace, updateRecordState } = registry;
+
 function formatManagedNames(names: Array<string | undefined>) {
   const filtered = names.filter(Boolean);
   return filtered.length > 0 ? filtered.join(", ") : "none";
+}
+
+export interface ReportGateEvidence {
+  received: boolean;
+  baselineDispatchAt: string;
+  effectiveDispatchAt: string;
+  latestDispatchAt?: string;
+  latestDispatchIntent?: string;
+  reportAt?: string;
+  reportId?: number;
+  reason?: string;
+}
+
+export async function reportReceivedAfterDispatch(
+  record: RegistryRecord,
+  name: string,
+): Promise<ReportGateEvidence> {
+  const baselineDispatchAt = record.dispatchAt ?? record.createdAt;
+  const inboundResult = await execHcom([
+    "events",
+    "--last",
+    "1000",
+    "--type",
+    "message",
+    "--mention",
+    name,
+  ]);
+  if (inboundResult.exitCode !== 0) {
+    return {
+      received: false,
+      baselineDispatchAt,
+      effectiveDispatchAt: baselineDispatchAt,
+      reason: inboundResult.stderr || inboundResult.stdout || "hcom inbound event query failed",
+    };
+  }
+
+  const inboundEvents = parseHcomEvents(inboundResult.stdout);
+  const latestDispatch = newestEvent(
+    inboundEvents.filter((event) => isInboundDispatchEvent(event, name)),
+  );
+  const baselineMs = eventTimeMs(baselineDispatchAt);
+  const latestDispatchMs = latestDispatch ? eventTimeMs(latestDispatch) : null;
+  const effectiveDispatchMs = [baselineMs, latestDispatchMs]
+    .filter((value): value is number => value !== null)
+    .reduce((latest, value) => Math.max(latest, value), 0);
+  const effectiveDispatchAt = effectiveDispatchMs > 0
+    ? new Date(effectiveDispatchMs).toISOString()
+    : baselineDispatchAt;
+
+  const outboundResult = await execHcom([
+    "events",
+    "--last",
+    "1000",
+    "--type",
+    "message",
+    "--agent",
+    name,
+    "--after",
+    effectiveDispatchAt,
+  ]);
+  if (outboundResult.exitCode !== 0) {
+    return {
+      received: false,
+      baselineDispatchAt,
+      effectiveDispatchAt,
+      ...(latestDispatch ? { latestDispatchAt: eventTimestamp(latestDispatch), latestDispatchIntent: messageFields(latestDispatch).intent } : {}),
+      reason: outboundResult.stderr || outboundResult.stdout || "hcom outbound event query failed",
+    };
+  }
+
+  const report = newestEvent(
+    parseHcomEvents(outboundResult.stdout).filter(
+      (event) => {
+        const timestamp = eventTimeMs(event);
+        return effectiveDispatchMs > 0 && timestamp !== null && timestamp >= effectiveDispatchMs && isAgentMessageEvent(event, name);
+      },
+    ),
+  );
+  return {
+    received: Boolean(report),
+    baselineDispatchAt,
+    effectiveDispatchAt,
+    ...(latestDispatch ? { latestDispatchAt: eventTimestamp(latestDispatch), latestDispatchIntent: messageFields(latestDispatch).intent } : {}),
+    ...(report ? { reportAt: eventTimestamp(report), reportId: report.id } : {}),
+  };
 }
 
 /**
@@ -198,12 +290,21 @@ export async function resolveTeardownTargets(
 export async function runTeardown(
   targets: { record: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }[],
   action: "stop" | "kill",
+  options: { force?: boolean; updateState?: boolean; allowMissing?: boolean } = {},
 ): Promise<{ name: string; ok: boolean; text: string }[]> {
   const results: { name: string; ok: boolean; text: string }[] = [];
 
   for (const { record, liveAgent, canonicalName } of targets) {
     const isLost = record.state === "managed_lost" || record.state === "adopted_lost";
     if (isLost && !liveAgent) {
+      if (options.allowMissing) {
+        results.push({
+          name: canonicalName,
+          ok: true,
+          text: `Agent "${canonicalName}" was already absent from hcom.`,
+        });
+        continue;
+      }
       results.push({
         name: canonicalName,
         ok: false,
@@ -212,10 +313,32 @@ export async function runTeardown(
       continue;
     }
 
+    if (record.requireReport && !options.force) {
+      const report = await reportReceivedAfterDispatch(record, canonicalName);
+      if (!report.received) {
+        const dispatchAt = record.dispatchAt ?? record.createdAt;
+        const reason = report.reason ? ` Verification failed: ${report.reason}.` : " No agent-originated message was received after dispatch.";
+        results.push({
+          name: canonicalName,
+          ok: false,
+          text: `[${E_REPORT_REQUIRED}] Refusing to ${action} agent "${canonicalName}": require_report=true.${reason} Inspect the report/transcript or retry with force=true. Dispatch: ${dispatchAt}.`,
+        });
+        continue;
+      }
+    }
+
     const args = action === "kill" ? ["kill", canonicalName, "--go"] : ["stop", canonicalName];
     const result = await execHcom(args);
     if (result.exitCode !== 0) {
       if ((result.stderr || result.stdout).toLowerCase().includes("not found")) {
+        if (options.allowMissing) {
+          results.push({
+            name: canonicalName,
+            ok: true,
+            text: `Agent "${canonicalName}" was already absent from hcom.`,
+          });
+          continue;
+        }
         const lostState = record.state.startsWith("adopted_") ? "adopted_lost" : "managed_lost";
         updateRecordState(record.id, lostState);
         results.push({
@@ -233,8 +356,10 @@ export async function runTeardown(
       continue;
     }
 
-    const newState = record.state.startsWith("adopted_") ? "adopted_stopped" : "managed_stopped";
-    updateRecordState(record.id, newState);
+    if (options.updateState !== false) {
+      const newState = record.state.startsWith("adopted_") ? "adopted_stopped" : "managed_stopped";
+      updateRecordState(record.id, newState);
+    }
     const adoptedLabel = record.state.startsWith("adopted_") ? " (adopted agent)" : "";
     results.push({
       name: canonicalName,
@@ -254,16 +379,17 @@ export function registerLifecycleTools(server: any) {
     {
       names: z.array(z.string()).optional().describe("hcom agent names to stop. Provide names or tag, not both."),
       tag: z.string().optional().describe("Stop every owned agent carrying this tag (fan out over owned records only)."),
+      force: z.boolean().optional().default(false).describe("Bypass only the require_report close gate; ownership and hub self-protection still apply (default: false)."),
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
     },
-    async ({ names, tag, workspace, sender_name }: { names?: string[]; tag?: string; workspace?: string; sender_name?: string }) => {
+    async ({ names, tag, force, workspace, sender_name }: { names?: string[]; tag?: string; force?: boolean; workspace?: string; sender_name?: string }) => {
       const resolution = await resolveTeardownTargets(names, tag, "stop", sender_name, workspace);
       if (!resolution.ok) return resolution.response;
 
       const { cwd, targets, failures } = resolution;
 
-      const results = await runTeardown(targets, "stop");
+      const results = await runTeardown(targets, "stop", { force: force ?? false });
 
       const payload: Record<string, unknown> = {
         workspace: cwd,
@@ -289,16 +415,17 @@ export function registerLifecycleTools(server: any) {
     {
       names: z.array(z.string()).optional().describe("hcom agent names to kill. Provide names or tag, not both."),
       tag: z.string().optional().describe("Kill every owned agent carrying this tag (fan out over owned records only)."),
+      force: z.boolean().optional().default(false).describe("Bypass only the require_report close gate; ownership and hub self-protection still apply (default: false)."),
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
     },
-    async ({ names, tag, workspace, sender_name }: { names?: string[]; tag?: string; workspace?: string; sender_name?: string }) => {
+    async ({ names, tag, force, workspace, sender_name }: { names?: string[]; tag?: string; force?: boolean; workspace?: string; sender_name?: string }) => {
       const resolution = await resolveTeardownTargets(names, tag, "kill", sender_name, workspace);
       if (!resolution.ok) return resolution.response;
 
       const { cwd, targets, failures } = resolution;
 
-      const results = await runTeardown(targets, "kill");
+      const results = await runTeardown(targets, "kill", { force: force ?? false });
 
       const payload: Record<string, unknown> = {
         workspace: cwd,

@@ -137,6 +137,7 @@ test('prune tool expired+confirm kills the agents then clears their records', as
         }
         return { removed: [], wouldRemove: [{ id: 'expired-1', hcomName: 'waka', state: 'managed_expired' }] };
       },
+      removeRecords: () => {},
     },
   });
 

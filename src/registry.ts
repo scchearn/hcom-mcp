@@ -9,6 +9,7 @@ import {
   type OwnershipState,
   type Harness,
   type HcomAgent,
+  type LaunchMode,
 } from "./types.js";
 
 export const REGISTRY_DIR = join(homedir(), ".hcom", "mcp");
@@ -140,11 +141,16 @@ function saveRegistry(registry: Registry): void {
 /**
  * Add a new ownership record.
  */
-export function addRecord(record: Omit<RegistryRecord, "id" | "createdAt" | "lastSeenAt">): RegistryRecord {
+export function addRecord(
+  record: Omit<RegistryRecord, "id" | "createdAt" | "lastSeenAt" | "requireReport"> & {
+    requireReport?: boolean;
+  },
+): RegistryRecord {
   const registry = loadRegistry();
   const now = new Date().toISOString();
   const full: RegistryRecord = {
     ...record,
+    requireReport: record.requireReport ?? false,
     id: randomUUID(),
     createdAt: now,
     lastSeenAt: now,
@@ -224,6 +230,54 @@ export function updateRecordHcomInfo(
 }
 
 /**
+ * Reconcile a resumed agent into its retained ownership record.
+ *
+ * Resume keeps the hcom identity, so appending a second record for the same
+ * session makes lifecycle ownership ambiguous. Update the source record
+ * atomically and release only duplicates with the same retained session. A
+ * recycled hcom name with a different session is a different agent and must
+ * remain owned and auditable.
+ */
+export function upsertResumedRecord(
+  id: string,
+  updates: {
+    hcomName?: string;
+    sessionId?: string;
+    launchMode?: LaunchMode;
+    state?: OwnershipState;
+    resumedFrom?: string;
+    requireReport?: boolean;
+    dispatchAt?: string;
+  },
+): RegistryRecord | null {
+  const registry = loadRegistry();
+  const record = registry.records.find((candidate) => candidate.id === id);
+  if (!record) return null;
+
+  const resumedSessionId = updates.sessionId ?? record.sessionId;
+  const now = new Date().toISOString();
+  if (resumedSessionId) {
+    for (const candidate of registry.records) {
+      if (
+        candidate.id !== id &&
+        !candidate.released &&
+        candidate.workspace === record.workspace &&
+        candidate.sessionId === resumedSessionId
+      ) {
+        candidate.released = true;
+        candidate.lastSeenAt = now;
+      }
+    }
+  }
+
+  Object.assign(record, updates);
+  record.released = false;
+  record.lastSeenAt = now;
+  saveRegistry(registry);
+  return record;
+}
+
+/**
  * Mark a record as released (handed off to human).
  */
 export function releaseRecord(id: string): RegistryRecord | null {
@@ -282,6 +336,7 @@ export function adoptRecord(params: {
     createdAt: now,
     lastSeenAt: now,
     released: false,
+    requireReport: false,
   };
   registry.records.push(full);
   saveRegistry(registry);

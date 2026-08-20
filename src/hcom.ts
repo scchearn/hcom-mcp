@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { HarnessEnum } from "./types.js";
 import type { Harness, HcomAgent } from "./types.js";
@@ -15,6 +15,15 @@ export interface ExecResult {
    * that case so a timeout can never be confused with a spawn failure.
    */
   timedOut?: boolean;
+  /**
+   * True when a long-running child was handed back to the caller alive after
+   * the handoff ceiling. No kill was sent in this case.
+   */
+  handedOff?: boolean;
+  /** Process id when a child was handed back alive. */
+  pid?: number;
+  /** True when captured diagnostics were capped while the child kept running. */
+  outputTruncated?: boolean;
 }
 
 export interface ExecOptions {
@@ -26,6 +35,83 @@ export interface ExecOptions {
   // (hcom events --wait, launch readiness waits) should pass gate_timeout + ~10s
   // slack so the CLI's own timeout fires first.
   timeoutMs?: number;
+  // Long-running callers can hand a child back without killing it. Its output
+  // is streamed and drained until the child exits or this ceiling is reached.
+  handoffTimeoutMs?: number;
+  // Maximum diagnostic output retained in memory for a streaming handoff.
+  captureLimitBytes?: number;
+}
+
+async function execCommandWithHandoff(
+  command: string,
+  args: string[],
+  options: ExecOptions,
+): Promise<ExecResult> {
+  const captureLimit = options.captureLimitBytes ?? 2 * 1024 * 1024;
+
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      detached: true,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let outputTruncated = false;
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const append = (current: string, chunk: Buffer): string => {
+      if (current.length >= captureLimit) {
+        outputTruncated = true;
+        return current;
+      }
+      const text = chunk.toString();
+      if (current.length + text.length <= captureLimit) return current + text;
+      outputTruncated = true;
+      return current + text.slice(0, captureLimit - current.length);
+    };
+
+    const settle = (result: Omit<ExecResult, "stdout" | "stderr">) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        ...(outputTruncated ? { outputTruncated: true } : {}),
+        ...result,
+      });
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = append(stderr, chunk);
+    });
+    child.once("error", (err) => {
+      if (!stderr) stderr = err instanceof Error ? err.message : String(err);
+      settle({ exitCode: 1 });
+    });
+    child.once("close", (code) => {
+      settle({ exitCode: typeof code === "number" ? code : 1 });
+    });
+
+    timer = setTimeout(() => {
+      // Keep draining both pipes and deliberately leave the child alive. This
+      // prevents a large JSON response from turning a useful resume into a kill.
+      child.stdout?.resume();
+      child.stderr?.resume();
+      child.unref();
+      settle({
+        exitCode: -1,
+        handedOff: true,
+        ...(typeof child.pid === "number" ? { pid: child.pid } : {}),
+      });
+    }, options.handoffTimeoutMs);
+  });
 }
 
 /**
@@ -36,6 +122,9 @@ export async function execCommand(
   args: string[],
   options: ExecOptions = {},
 ): Promise<ExecResult> {
+  if (options.handoffTimeoutMs !== undefined) {
+    return execCommandWithHandoff(command, args, options);
+  }
   try {
     const { stdout, stderr } = await execFileAsync(command, args, {
       maxBuffer: 10 * 1024 * 1024,

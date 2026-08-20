@@ -11,6 +11,17 @@ test('execCommand honors a per-call timeoutMs and reports timedOut', async () =>
   assert.equal(result.timedOut, true);
 });
 
+test('execCommand hands off a long-running child without killing it', async () => {
+  const result = await execCommand('node', ['-e', 'setTimeout(() => {}, 500)'], {
+    handoffTimeoutMs: 25,
+  });
+
+  assert.equal(result.exitCode, -1);
+  assert.equal(result.handedOff, true);
+  assert.equal(result.timedOut, undefined);
+  assert.equal(typeof result.pid, 'number');
+});
+
 test('execCommand does not report timedOut for a normal nonzero exit', async () => {
   const result = await execCommand('node', ['-e', 'process.exit(3)']);
 

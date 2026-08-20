@@ -86,8 +86,34 @@ test('launch exit 0 records managed_active and persists batchId', async (t) => {
   assert.equal(added[0].state, 'managed_active');
   assert.equal(added[0].batchId, 'batch-77');
   assert.equal(added[0].hcomName, 'waka');
+  assert.equal(added[0].requireReport, false);
   const payload = JSON.parse(response.content[0].text);
   assert.equal(payload.batchId, 'batch-77');
+});
+
+test('launch persists the report requirement and dispatch timestamp', async (t) => {
+  const added = [];
+  mockLaunchDeps(t, {
+    execHcom: async () => ({ exitCode: 0, stdout: 'Names: waka\nBatch id: batch-report\n', stderr: '' }),
+    addRecord: (record) => {
+      added.push(record);
+      return { ...record, id: 'record-report' };
+    },
+  });
+
+  const { registerLaunchTool } = await loadLaunchModule();
+  const server = createFakeServer();
+  registerLaunchTool(server);
+  const response = await server.handlers.get('launch')({
+    harness: 'opencode',
+    model: 'opencode/deepseek-v4-flash-free',
+    require_report: true,
+    sender_name: 'nora',
+  });
+
+  assert.equal(response.isError, undefined);
+  assert.equal(added[0].requireReport, true);
+  assert.match(added[0].dispatchAt, /^2026-/);
 });
 
 test('launch exit 2 with names records managed_blocked and returns a non-error with a term hint', async (t) => {

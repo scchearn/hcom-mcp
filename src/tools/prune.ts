@@ -1,7 +1,9 @@
 import { z } from "zod";
-import { execHcom } from "../hcom.js";
-import { pruneRecords } from "../registry.js";
+import * as registry from "../registry.js";
+import { runTeardown } from "./lifecycle.js";
 import { E_INTERNAL, E_PRUNE_KILL_FAILED, internalError, toolError } from "../errors.js";
+
+const { pruneRecords, removeRecords } = registry;
 
 export function registerPruneTool(server: any) {
   server.tool(
@@ -17,6 +19,7 @@ export function registerPruneTool(server: any) {
       allWorkspaces: z.boolean().default(false).describe("DEPRECATED camelCase alias for all_workspaces (kept for one release; use all_workspaces)"),
       all_workspaces: z.boolean().default(false).describe("Prune records across all workspaces in one call (default: only the given workspace)"),
       expired: z.boolean().default(false).describe("Target expired ephemeral records (ttl_minutes launches): kill the agents and clear their records"),
+      force: z.boolean().default(false).describe("Bypass report-required teardown gates when intentionally clearing expired records"),
       verbose: z.boolean().default(false).describe("Include the full removed records in the response (default: summary only)"),
     },
     async ({
@@ -29,6 +32,7 @@ export function registerPruneTool(server: any) {
       allWorkspaces,
       all_workspaces,
       expired,
+      force,
       verbose,
     }: {
       workspace?: string;
@@ -40,6 +44,7 @@ export function registerPruneTool(server: any) {
       allWorkspaces: boolean;
       all_workspaces: boolean;
       expired: boolean;
+      force: boolean;
       verbose: boolean;
     }) => {
       const cwd = workspace ?? process.cwd();
@@ -54,7 +59,8 @@ export function registerPruneTool(server: any) {
         // direct handler invocation.
         const effectiveAllWorkspaces = all_workspaces || allWorkspaces || false;
 
-        // Expired mode kills the agents before clearing their records.
+        // Expired mode kills the agents through the same guarded teardown path
+        // as stop/kill, then clears only records whose kill succeeded.
         if (expired && confirm) {
           const result = await pruneRecords(cwd, {
             lostOlderThanDays: effectiveLostOlderThanDays,
@@ -64,37 +70,47 @@ export function registerPruneTool(server: any) {
             allWorkspaces: effectiveAllWorkspaces,
             expired: true,
           });
-          const killTargets = result.wouldRemove
-            .filter((r) => r.hcomName)
-            .map((r) => r.hcomName!);
-          const failedKills: string[] = [];
-          for (const name of killTargets) {
-            const kill = await execHcom(["kill", name, "--go"]);
-            const msg = (kill.stderr || kill.stdout).toLowerCase();
-            // "not found" means the agent already exited on its own — safe to
-            // clear. Any other failure leaves the agent alive, so its record
-            // must NOT be cleared (no orphaned live agents).
-            if (kill.exitCode !== 0 && !msg.includes("not found")) {
-              failedKills.push(name);
-            }
+          const teardown = await runTeardown(
+            result.wouldRemove.map((record) => ({
+              record,
+              liveAgent: null,
+              canonicalName: record.hcomName ?? record.id,
+            })),
+            "kill",
+            { force: force ?? false, updateState: false, allowMissing: true },
+          );
+          const failedTeardown = teardown.filter((entry) => !entry.ok);
+          const reportSkips = failedTeardown
+            .filter((entry) => entry.text.includes("E_REPORT_REQUIRED"))
+            .map((entry) => entry.text);
+          if (reportSkips.length > 0) {
+            return {
+              isError: true,
+              content: [{
+                type: "text" as const,
+                text: JSON.stringify({
+                  dryRun: false,
+                  message: "No records were removed because report-required teardown was refused",
+                  count: 0,
+                  stateBreakdown: {},
+                  names: [],
+                  skipped: reportSkips,
+                  teardown,
+                }, null, 2),
+              }],
+            };
           }
-          if (failedKills.length > 0) {
+          if (failedTeardown.length > 0) {
+            const failedKills = failedTeardown.map((entry) => entry.name);
             return toolError(
               E_PRUNE_KILL_FAILED,
               `failed to kill ${failedKills.join(", ")} before clearing records. ` +
                 `No records were removed; retry after confirming the agents are gone.`,
             );
           }
-          const confirmed = await pruneRecords(cwd, {
-            lostOlderThanDays: effectiveLostOlderThanDays,
-            includeStopped,
-            stoppedOlderThanDays,
-            confirm: true,
-            allWorkspaces: effectiveAllWorkspaces,
-            expired: true,
-          });
-          return summarize(confirmed.removed, true, verbose, {
-            killed: killTargets,
+          removeRecords(result.wouldRemove.map((record) => record.id));
+          return summarize(result.wouldRemove, true, verbose, {
+            killed: teardown.filter((entry) => entry.ok).map((entry) => entry.name),
           });
         }
 
