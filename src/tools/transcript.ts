@@ -31,7 +31,7 @@ const TranscriptAgentTypeEnum = z.enum([
 export function registerTranscriptTool(server: any) {
   server.tool(
     "transcript",
-    "Read hcom transcripts. Supports per-agent transcript reads (including range/full/detailed), cross-agent transcript search, and timeline view. Returns { mode, agent?, transcript|result } where transcript/result is the parsed hcom JSON. Read-only; no sender identity required. Related: inspect (status/events/term), continue_from (handoff bundles).",
+    "Read hcom transcripts: per-agent reads (range/full/detailed), cross-agent search, and timeline view. Read-only; no sender identity required. Related: inspect (status/events/term), continue_from (handoff bundles).",
     {
       mode: TranscriptModeEnum.describe("Operation: read one agent transcript, search transcripts, or view the timeline"),
       name: z.string().optional().describe("Agent name for read mode"),

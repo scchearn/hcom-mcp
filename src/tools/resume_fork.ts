@@ -533,7 +533,7 @@ async function runResumeFork(
 export function registerResumeForkTools(server: any) {
   server.tool(
     "resume",
-    "Resume a stopped agent (hcom r). Registers a new ownership record with a resumedFrom link to the source agent, completing the continue_from handoff story. The source agent's identity is reclaimed when hcom supports it. Returns { kind, target, spawnedName, registryId, resumedFrom, command }. Preconditions: sender identity (see sender_name). Related: continue_from (handoff context), fork (branch instead).",
+    "Resume a stopped agent (hcom r). Registers a new ownership record linked to the source (resumedFrom). Preconditions: sender identity (see sender_name). Related: continue_from (handoff context), fork (branch instead).",
     {
       name: z.string().describe("Target: hcom name, session UUID, ses_<id>, or thread name."),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
@@ -575,7 +575,7 @@ export function registerResumeForkTools(server: any) {
 
   server.tool(
     "fork",
-    "Fork an agent session (hcom f): creates a new agent that continues from the forked session. Registers a new ownership record with a resumedFrom link to the source agent. Returns { kind, target, spawnedName, registryId, resumedFrom, command }. Preconditions: sender identity (see sender_name). Related: continue_from (handoff context), resume (continue the same session).",
+    "Fork an agent session (hcom f): creates a new agent continuing from the forked session, registered with a resumedFrom link to the source. Preconditions: sender identity (see sender_name). Related: continue_from (handoff context), resume (continue the same session).",
     {
       name: z.string().describe("Target: hcom name, session UUID, ses_<id>, or thread name."),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),

@@ -7,7 +7,7 @@ const SendIntentEnum = z.enum(["request", "inform", "ack"]);
 export function registerSendTool(server: any) {
   server.tool(
     "send",
-    "Send an hcom message to one or more agents. Unbound HTTP MCP clients can launch, inspect, and kill agents but could not message them — this closes that gap. No broadcast, no --from, no file variants. Returns { targets, intent, senderName, delivered, output }. Preconditions: sender identity (see sender_name); intent=ack requires reply_to (E_ACK_REQUIRES_REPLY_TO). Related: thread_seed (thread creation), watch_agents (subscribe mode).",
+    "Send an hcom message to one or more agents. No broadcast, no --from, no file variants. Preconditions: sender identity (see sender_name); intent=ack requires reply_to (E_ACK_REQUIRES_REPLY_TO). Related: thread_seed (thread creation), watch_agents (subscribe mode).",
     {
       targets: z.array(z.string()).min(1).describe("Target agents/tags, e.g. ['@eng-', '@review-']. @ prefix optional; tag syntax ('@tag-') fans out to the group."),
       message: z.string().describe("Message body."),

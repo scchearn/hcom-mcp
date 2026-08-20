@@ -375,7 +375,7 @@ export function registerLifecycleTools(server: any) {
   // stop
   server.tool(
     "stop",
-    "Stop (disconnect) a managed or adopted agent. Accepts one or more names, or a tag to stop every owned agent in the group. Ownership checks are never bypassed; per-name results are returned. Returns { workspace, results, stopped, failed, skipped? }. Preconditions: targets must be owned in this workspace (E_NOT_MANAGED otherwise) and must not be the calling hub agent (E_SELF_PROTECTION); sender identity required (see sender_name). Related: kill (also closes the terminal pane), adopt (take ownership first).",
+    "Stop (disconnect) a managed or adopted agent. Accepts names or a tag to stop every owned agent in a group; ownership is never bypassed and per-name results are returned. Preconditions: targets owned in this workspace (E_NOT_MANAGED) and not the calling hub (E_SELF_PROTECTION); sender identity required (see sender_name). Related: kill (also closes the terminal pane), adopt (take ownership first).",
     {
       names: z.array(z.string()).optional().describe("hcom agent names to stop. Provide names or tag, not both."),
       tag: z.string().optional().describe("Stop every owned agent carrying this tag (fan out over owned records only)."),
@@ -411,7 +411,7 @@ export function registerLifecycleTools(server: any) {
   // kill
   server.tool(
     "kill",
-    "Kill a managed or adopted agent and close its terminal pane. Accepts one or more names, or a tag to kill every owned agent in the group. Ownership checks are never bypassed; per-name results are returned. Returns { workspace, results, killed, failed, skipped? }. Preconditions: targets must be owned in this workspace (E_NOT_MANAGED otherwise) and must not be the calling hub agent (E_SELF_PROTECTION); sender identity required (see sender_name). Related: stop (disconnect only), adopt (take ownership first).",
+    "Kill a managed or adopted agent and close its terminal pane. Accepts names or a tag to kill every owned agent in a group; ownership is never bypassed and per-name results are returned. Preconditions: targets owned in this workspace (E_NOT_MANAGED) and not the calling hub (E_SELF_PROTECTION); sender identity required (see sender_name). Related: stop (disconnect only), adopt (take ownership first).",
     {
       names: z.array(z.string()).optional().describe("hcom agent names to kill. Provide names or tag, not both."),
       tag: z.string().optional().describe("Kill every owned agent carrying this tag (fan out over owned records only)."),
