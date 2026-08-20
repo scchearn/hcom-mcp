@@ -5,7 +5,7 @@ import { E_NO_SENDER, E_THREAD_FAILED, toolError } from "../errors.js";
 export function registerThreadSeedTool(server: any) {
   server.tool(
     "thread_seed",
-    "Create a workflow thread. Auto-includes the hub (calling agent) in the member list so the hub receives thread messages. Use instead of raw hcom send for thread creation when hcom-mcp is available. Returns { threadName, senderName, hubName, mentions, seedDelivered, output }. The thread exists once the first --thread send lands; there is no separate creation step.",
+    "Create a workflow thread. Auto-includes the hub (calling agent) so it receives thread messages. Use instead of raw hcom send for thread creation when hcom-mcp is available. The thread exists once the first --thread send lands; there is no separate creation step.",
     {
       thread_name: z.string().describe("Thread name, e.g. 'repo-task-1747354927'"),
       mentions: z.array(z.string()).describe("Target agents/tags, e.g. ['@eng-', '@review-']. @ prefix optional."),

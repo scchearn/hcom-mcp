@@ -52,7 +52,7 @@ export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgen
 export function registerListManagedTool(server: any) {
   server.tool(
     "list_managed",
-    "List all hcom agents managed by this MCP server in the current workspace. Returns { managed, total } where each record is enriched with managementType (managed/adopted), liveFound, liveName, liveBaseName, liveStatus, liveDescription, liveTool, liveTag. Read-only; no sender identity required. Related: list_all (all live agents), status (counts + health).",
+    "List all hcom agents managed by this server in the current workspace, each record enriched with its live status. Read-only; no sender identity required. Related: list_all (all live agents), status (counts + health).",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
@@ -83,7 +83,7 @@ export function registerListManagedTool(server: any) {
 export function registerListAllTool(server: any) {
   server.tool(
     "list_all",
-    "List all live hcom agents visible to the local hcom CLI. Returns { agents, total } where each agent carries managementStatus (managed/adopted/unmanaged) resolved against the requested workspace. Read-only; no sender identity required. Related: list_managed (owned records only), inspect (per-agent detail).",
+    "List all live hcom agents visible to the local hcom CLI, each carrying its management status (managed/adopted/unmanaged) for the requested workspace. Read-only; no sender identity required. Related: list_managed (owned records only), inspect (per-agent detail).",
     {
       workspace: z.string().optional().describe("Workspace path for ownership resolution. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so managementStatus matches the workspace you query with list_managed."),
     },
@@ -131,7 +131,7 @@ export function registerListAllTool(server: any) {
 export function registerListPresetsTool(server: any) {
   server.tool(
     "list_presets",
-    "List merged agent presets available to this server in the current workspace. Returns { presets, total }; each preset carries name, supportedHarnesses, modelsByHarness, headless, pty, tag, ttlMinutes, hasDir, hasPrompt, hasSystemPrompt, and promptPreview (first 120 chars of the prompt) when prompt_preview=true. Read-only; no sender identity required. Related: launch (consumes presets), list_topologies.",
+    "List merged agent presets available to this server in the current workspace, with each preset's harnesses, models, and flags (and a promptPreview when prompt_preview=true). Read-only; no sender identity required. Related: launch (consumes presets), list_topologies.",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
       prompt_preview: z.boolean().optional().describe("Include a promptPreview (first 120 chars) per preset (default: false)"),
@@ -155,7 +155,7 @@ export function registerListPresetsTool(server: any) {
 export function registerListTopologiesTool(server: any) {
   server.tool(
     "list_topologies",
-    "List merged topology presets available to this server in the current workspace. Returns { topologies, total }; each topology carries name, roleCount, roles (role/preset/harness/count), hub, threadPrefix, missingPresets. Read-only; no sender identity required. Related: launch_topology (consumes topologies), list_presets.",
+    "List merged topology presets available to this server in the current workspace, each with its roles, hub, thread prefix, and any missing presets. Read-only; no sender identity required. Related: launch_topology (consumes topologies), list_presets.",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
@@ -178,7 +178,7 @@ export function registerListTopologiesTool(server: any) {
 export function registerStatusTool(server: any) {
   server.tool(
     "status",
-    "Show a quick health and orientation summary for hcom-mcp, including the hcom CLI installation health (hooks/install breakage is invisible until launches die, so it is surfaced here). Returns { hcomAvailable, hcomVersion, hcomHealth, workspace, paths, agentPresetCount, topologyPresetCount, liveAgentCount, managedRecordCount, stateBreakdown, managedLostCount, managedReleasedCount }. Read-only; no sender identity required. Related: list_managed, list_all, list_presets.",
+    "Quick health and orientation summary for hcom-mcp, including hcom CLI install health — surfaced here because hook/install breakage stays invisible until launches die. Read-only; no sender identity required. Related: list_managed, list_all, list_presets.",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },

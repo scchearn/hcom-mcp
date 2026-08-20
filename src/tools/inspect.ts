@@ -12,7 +12,7 @@ import { E_AGENT_NOT_FOUND, E_INTERNAL, internalError, toolError } from "../erro
 export function registerInspectTool(server: any) {
   server.tool(
     "inspect",
-    "Inspect any live hcom agent: status, transcript, events, or terminal screen. Returns { agent, managementStatus (managed/adopted/unmanaged), inspect } where inspect is the per-aspect payload (status: agent JSON; transcript: text; events: parsed event array; term: parsed screen). Precondition: the agent must be live in hcom (E_AGENT_NOT_FOUND otherwise). Read-only; no sender identity required. Related: list_all (discover agents), transcript (richer reads).",
+    "Inspect any live hcom agent: status, transcript, events, or terminal screen. Returns the management status plus the requested per-aspect payload. Precondition: agent must be live (E_AGENT_NOT_FOUND). Read-only; no sender identity required. Related: list_all (discover agents), transcript (richer reads).",
     {
       name: z.string().describe("hcom agent name to inspect"),
       aspect: z.enum(["status", "transcript", "events", "term"]).describe("What to inspect"),

@@ -25,7 +25,7 @@ function defaultAdoptNotice(hub: string, name: string, harness: Harness, workspa
 export function registerAdoptTool(server: any) {
   server.tool(
     "adopt",
-    "Adopt one or more existing hcom agents into managed lifecycle. Creates adopted registry records for agents that were not spawned by hcom-mcp, enabling stop/kill management. Requires the agents to be live in hcom. Sends an hcom inform message to each adoptee with adoption instructions (hub name, harness, workspace, and the 'using-hcom' skill loading instruction). Returns { adopted, skipped, notify } where adopted is the record list and skipped lists per-name failures. Preconditions: sender identity (see sender_name); the calling hub agent cannot adopt itself (E_SELF_PROTECTION). Related: list_all (find unmanaged agents), stop/kill (now permitted).",
+    "Adopt one or more live hcom agents not spawned by hcom-mcp into managed lifecycle, enabling stop/kill. Sends each adoptee an hcom inform with adoption instructions. Returns adopted records and per-name skips. Preconditions: sender identity (see sender_name); cannot adopt the calling hub itself (E_SELF_PROTECTION). Related: list_all (find unmanaged agents), stop/kill (now permitted).",
     {
       names: z.array(z.string()).min(1).describe("hcom agent names to adopt (one or more)"),
       workspace: z.string().optional().describe("Workspace path for registry. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so the record is scoped to the workspace you query with list_managed."),

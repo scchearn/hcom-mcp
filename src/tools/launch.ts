@@ -168,7 +168,7 @@ export async function validatePresetModelAvailability(
 export function registerLaunchTool(server: any) {
   server.tool(
     "launch",
-    "Launch one or more headless hcom agents. Use a preset name for configured defaults, or provide harness+model directly for a bare launch. Preset defaults (model, tag, prompt) can be overridden with explicit parameters. Returns { presetName, hcomNames, batchId, registryId, registryIds, command } plus blocked/reason when hcom exits 2 (agent alive but blocked or still launching) and modelNote/reasoningNote when applicable. Preconditions: sender identity (see sender_name). Related: spawn_and_verify (readiness gate), launch_topology (multi-role batches), list_presets (catalog).",
+    "Launch one or more headless hcom agents. Use a preset name for configured defaults, or harness+model directly for a bare launch; explicit params override preset defaults. Reports blocked/reason when hcom exits 2 (alive but blocked or still launching). Preconditions: sender identity (see sender_name). Related: spawn_and_verify (readiness gate), launch_topology (multi-role batches), list_presets (catalog).",
     {
       harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity, gemini, kilo, pi, omp, cursor, kimi, copilot)"),
       preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
@@ -299,7 +299,7 @@ export function registerLaunchTool(server: any) {
 export function registerTopologyLaunchTool(server: any) {
   server.tool(
     "launch_topology",
-    "Launch multiple agents from a topology preset. Rolls back all if any fail. With verify=true, gates each launched agent on readiness (same gate as spawn_and_verify) and reports per-agent outcomes. Returns { topology, launched, totalAgents, verifyOutcomes? }. Preconditions: sender identity (see sender_name). Related: list_topologies (catalog), launch (single agent).",
+    "Launch multiple agents from a topology preset; rolls back all if any fail. With verify=true, gates each on readiness (same gate as spawn_and_verify) and reports per-agent outcomes. Preconditions: sender identity (see sender_name). Related: list_topologies (catalog), launch (single agent).",
     {
       topology: z.string().describe("Name of the topology preset from config"),
       workspace: z.string().optional().describe("Workspace path for ownership tracking. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
@@ -819,7 +819,7 @@ async function fetchScreenTailSafe(
 export function registerSpawnAndVerifyTool(server: any) {
   server.tool(
     "spawn_and_verify",
-    "Launch an agent and gate on readiness. Reuses the launch path unchanged; waits for the batch to reach a terminal state (one hcom events launch call, not a polling loop). Classifies ready / failed / timeout / blocked. With on_blocked=rescue, iterates allowlist-guarded rescue gates until ready. Persists outcome + latencyMs + reason on the registry record. Returns { launch, outcomes, summary }. Preconditions: sender identity (see sender_name). Related: launch (no gate), unblock (manual rescue), launch_topology (verify=true).",
+    "Launch an agent and gate on readiness: waits for the batch to reach a terminal state (one hcom events call, not a polling loop) and classifies ready/failed/timeout/blocked. With on_blocked=rescue, iterates allowlist-guarded rescue gates until ready. Persists outcome, latencyMs, and reason on the record. Preconditions: sender identity (see sender_name). Related: launch (no gate), unblock (manual rescue), launch_topology (verify=true).",
     {
       harness: HarnessEnum.describe("Harness variant to launch (claude, opencode, codex, antigravity, gemini, kilo, pi, omp, cursor, kimi, copilot)"),
       preset: z.string().optional().describe("Name of the agent preset from config (optional if model is provided)"),
