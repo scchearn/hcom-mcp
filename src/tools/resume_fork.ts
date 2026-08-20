@@ -3,7 +3,16 @@ import { execCommand, execHcom, resolveCallerName } from "../hcom.js";
 import { addRecord, getOwnedRecordsByWorkspace, upsertResumedRecord } from "../registry.js";
 import { HarnessEnum } from "../types.js";
 import type { Harness, RegistryRecord } from "../types.js";
-import { E_INTERNAL, E_LAUNCH_FAILED, E_NO_SENDER, internalError, toolError } from "../errors.js";
+import { E_INTERNAL, E_LAUNCH_FAILED, E_NO_SENDER, E_RESUME_UNSUPPORTED, internalError, toolError } from "../errors.js";
+import {
+  eventBelongsTo,
+  eventData,
+  eventTimeMs,
+  isAgentMessageEvent,
+  newestEvent,
+  parseHcomEvents,
+  type HcomEvent,
+} from "../events.js";
 
 const RESUME_CONSUMPTION_TIMEOUT_SEC = 60;
 const OPEN_CODE_SESSION_ID = /^ses_[A-Za-z0-9_-]+$/;
@@ -28,15 +37,6 @@ interface StoppedAgentSnapshot {
   tool?: string;
   directory?: string;
   sessionId?: string;
-}
-
-interface HcomEvent {
-  id?: number;
-  ts?: string;
-  timestamp?: string;
-  type?: string;
-  instance?: string;
-  data?: Record<string, unknown>;
 }
 
 interface ResumeSource {
@@ -65,40 +65,12 @@ function isRetainedOpenCodeSessionId(value: string | undefined): value is string
   return Boolean(value && OPEN_CODE_SESSION_ID.test(value));
 }
 
-function parseHcomEvents(stdout: string): HcomEvent[] {
-  return stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        const parsed = JSON.parse(line) as HcomEvent;
-        return parsed && typeof parsed === "object" ? [parsed] : [];
-      } catch {
-        return [];
-      }
-    });
-}
-
 function eventId(event: HcomEvent): number {
   return typeof event.id === "number" && Number.isFinite(event.id) ? event.id : 0;
 }
 
-function eventTimeMs(event: HcomEvent): number | null {
-  const raw = event.ts ?? event.timestamp;
-  if (!raw) return null;
-  const numeric = typeof raw === "number" ? raw : Number(raw);
-  if (Number.isFinite(numeric)) return numeric > 10_000_000_000 ? numeric : numeric * 1000;
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function eventData(event: HcomEvent, key: string): unknown {
-  return event.data?.[key];
-}
-
-function eventBelongsTo(event: HcomEvent, name: string): boolean {
-  return event.instance === name || eventData(event, "from") === name;
+function eventValue(event: HcomEvent, key: string): unknown {
+  return eventData(event)[key];
 }
 
 function eventIsAfter(event: HcomEvent, baselineId: number, startedAtMs: number): boolean {
@@ -118,9 +90,9 @@ function hasHcomConsumptionEvidence(
     if (!eventBelongsTo(event, name) || !eventIsAfter(event, baselineId, startedAtMs)) {
       return false;
     }
-    if (event.type === "message") return true;
+    if (event.type === "message") return isAgentMessageEvent(event, name);
     if (event.type !== "status") return false;
-    return eventData(event, "status") === "active" || eventData(event, "val") === "active";
+    return eventValue(event, "status") === "active" || eventValue(event, "val") === "active";
   });
 }
 
@@ -170,7 +142,7 @@ async function verifyResumeConsumption(
         eventBelongsTo(event, name) &&
         eventIsAfter(event, baselineId, startedAtMs) &&
         event.type === "status" &&
-        (eventData(event, "status") === "active" || eventData(event, "val") === "active"),
+        (eventValue(event, "status") === "active" || eventValue(event, "val") === "active"),
     );
     if (active) return { ok: true, evidence: "hcom status active" };
     if (hasHcomConsumptionEvidence(events, name, baselineId, startedAtMs)) {
@@ -197,13 +169,50 @@ async function verifyResumeConsumption(
   };
 }
 
+async function verifyResumeReport(
+  name: string,
+  baselineId: number,
+  startedAtMs: number,
+  execHcomFn: typeof execHcom,
+): Promise<{ ok: boolean; evidence?: string; reportId?: number; reason?: string }> {
+  const result = await execHcomFn(["events", "--last", "100", "--type", "message", "--agent", name]);
+  if (result.exitCode === 0) {
+    const report = newestEvent(
+      parseHcomEvents(result.stdout).filter(
+        (event) =>
+          isAgentMessageEvent(event, name) &&
+          eventIsAfter(event, baselineId, startedAtMs),
+      ),
+    );
+    if (report) {
+      return { ok: true, evidence: "hcom agent report", reportId: report.id };
+    }
+  }
+
+  return {
+    ok: false,
+    reason:
+      `OpenCode resume for "${name}" completed without a post-resume hcom report. ` +
+      "The retained session may not support plugin rebind for headless resume; no success was claimed.",
+  };
+}
+
 function findRetainedRecord(records: RegistryRecord[], target: string): RegistryRecord | undefined {
   const stripped = target.startsWith("@") ? target.slice(1) : target;
-  return records.find(
+  const candidates = records.filter(
     (record) =>
       !record.released &&
       (record.hcomName === stripped || record.sessionId === stripped),
   );
+  return candidates.sort((a, b) => {
+    const aExact = a.sessionId === stripped ? 1 : 0;
+    const bExact = b.sessionId === stripped ? 1 : 0;
+    if (aExact !== bExact) return bExact - aExact;
+    const aTime = Date.parse(a.lastSeenAt || a.createdAt);
+    const bTime = Date.parse(b.lastSeenAt || b.createdAt);
+    if (aTime !== bTime) return bTime - aTime;
+    return a.id.localeCompare(b.id);
+  })[0];
 }
 
 async function resolveResumeSource(
@@ -231,6 +240,16 @@ function activeStateFor(record: RegistryRecord | undefined): "managed_active" | 
   return record?.state.startsWith("adopted_") || record?.preset === "adopted"
     ? "adopted_active"
     : "managed_active";
+}
+
+function stoppedStateFor(record: RegistryRecord): "managed_stopped" | "adopted_stopped" {
+  return record.state.startsWith("adopted_") || record.preset === "adopted"
+    ? "adopted_stopped"
+    : "managed_stopped";
+}
+
+export function getOpenCodeResumeCommand(platform: NodeJS.Platform = process.platform): string | null {
+  return platform === "win32" ? null : "opencode";
 }
 
 async function runHeadlessOpenCodeResume(
@@ -268,6 +287,13 @@ async function runHeadlessOpenCodeResume(
   if (!hcomName) {
     return toolError(E_LAUNCH_FAILED, "The retained OpenCode record has no hcom identity; refusing to launch an untracked session.");
   }
+  const command = getOpenCodeResumeCommand();
+  if (!command) {
+    return toolError(
+      E_RESUME_UNSUPPORTED,
+      "Headless OpenCode resume is unsupported on Windows because the direct executable path cannot be resolved safely without a shell.",
+    );
+  }
   const directory = options.dir ?? source.directory;
   if (!directory) {
     return toolError(
@@ -277,44 +303,52 @@ async function runHeadlessOpenCodeResume(
   }
 
   const startedAtMs = Date.now();
+  const baselineId = await lastHcomEventId(hcomName, execHcom);
   const prompt = options.prompt?.trim() || DEFAULT_OPEN_CODE_RESUME_PROMPT;
   const processId = `hcom-mcp-resume-${hcomName}-${startedAtMs}`;
   const args = ["run", "--session", source.sessionId, "--format", "json", prompt];
-  const result = await execCommandFn("opencode", args, {
+  const result = await execCommandFn(command, args, {
     cwd: directory,
-    timeoutMs: (RESUME_CONSUMPTION_TIMEOUT_SEC + 10) * 1000,
+    // opencode run is synchronous and may legitimately exceed the hcom event
+    // gate. Never kill the resumed turn on an arbitrary wall-clock deadline.
+    timeoutMs: 0,
     env: {
       HCOM_LAUNCHED: "1",
       HCOM_BACKGROUND: "1",
       HCOM_TOOL: "opencode",
       HCOM_INSTANCE_NAME: hcomName,
       HCOM_PROCESS_ID: processId,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: { "*": "allow", external_directory: "allow" },
+      }),
     },
   });
-
-  if (result.exitCode !== 0 || result.timedOut) {
-    return toolError(
-      E_LAUNCH_FAILED,
-      `Headless OpenCode resume failed for "${hcomName}": ${result.stderr || result.stdout || "the opencode process exited without a response"}.`,
-    );
-  }
-  if (!hasOpenCodeResponseEvidence(result.stdout, source.sessionId)) {
-    return toolError(
-      E_LAUNCH_FAILED,
-      `Headless OpenCode resume for "${hcomName}" produced no response/transcript evidence for retained session ${source.sessionId}; refusing to claim the queued turn was consumed.`,
-    );
-  }
 
   const record = upsertResumedRecord(source.record.id, {
     hcomName,
     sessionId: source.sessionId,
-    state: activeStateFor(source.record),
+    state: stoppedStateFor(source.record),
     launchMode: "headless",
     resumedFrom: target,
     requireReport: source.record.requireReport ?? false,
     dispatchAt: new Date(startedAtMs).toISOString(),
   });
   if (!record) return toolError(E_LAUNCH_FAILED, `Retained ownership record "${source.record.id}" disappeared during resume.`);
+
+  if (result.exitCode !== 0 || result.timedOut) {
+    return toolError(
+      E_LAUNCH_FAILED,
+      `Headless OpenCode resume failed for "${hcomName}": ${result.stderr || result.stdout || "the opencode process exited without a response"}. The retained record was settled as ${record.state}.`,
+    );
+  }
+
+  const report = await verifyResumeReport(hcomName, baselineId, startedAtMs, execHcom);
+  if (!report.ok) {
+    return toolError(
+      E_RESUME_UNSUPPORTED,
+      `${report.reason} The retained record was settled as ${record.state}.`,
+    );
+  }
 
   return {
     content: [{
@@ -326,7 +360,12 @@ async function runHeadlessOpenCodeResume(
         registryId: record.id,
         resumedFrom: target,
         sessionId: source.sessionId,
-        evidence: ["opencode response/transcript"],
+        state: record.state,
+        evidence: [
+          report.evidence,
+          ...(hasOpenCodeResponseEvidence(result.stdout, source.sessionId) ? ["opencode response/transcript"] : []),
+        ],
+        ...(report.reportId ? { reportEventId: report.reportId } : {}),
         command: `opencode ${args.join(" ")}`,
       }, null, 2),
     }],

@@ -102,6 +102,12 @@ export function registerInspectTool(server: any) {
         const responsePayload = {
           agent: liveAgent.name,
           managementStatus,
+          reportEvidence: owned
+            ? {
+                required: Boolean(owned.requireReport),
+                ...(owned.dispatchAt ? { dispatchAt: owned.dispatchAt } : {}),
+              }
+            : null,
           inspect: result,
         };
 

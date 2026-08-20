@@ -233,8 +233,10 @@ export function updateRecordHcomInfo(
  * Reconcile a resumed agent into its retained ownership record.
  *
  * Resume keeps the hcom identity, so appending a second record for the same
- * name/session makes lifecycle ownership ambiguous. Update the source record
- * atomically and remove unreleased duplicates in the same workspace.
+ * session makes lifecycle ownership ambiguous. Update the source record
+ * atomically and release only duplicates with the same retained session. A
+ * recycled hcom name with a different session is a different agent and must
+ * remain owned and auditable.
  */
 export function upsertResumedRecord(
   id: string,
@@ -252,27 +254,25 @@ export function upsertResumedRecord(
   const record = registry.records.find((candidate) => candidate.id === id);
   if (!record) return null;
 
-  const duplicateIds = new Set(
-    registry.records
-      .filter((candidate) => {
-        if (candidate.id === id || candidate.released || candidate.workspace !== record.workspace) {
-          return false;
-        }
-        return Boolean(
-          (updates.hcomName && candidate.hcomName === updates.hcomName) ||
-          (updates.sessionId && candidate.sessionId === updates.sessionId),
-        );
-      })
-      .map((candidate) => candidate.id),
-  );
-
-  if (duplicateIds.size > 0) {
-    registry.records = registry.records.filter((candidate) => !duplicateIds.has(candidate.id));
+  const resumedSessionId = updates.sessionId ?? record.sessionId;
+  const now = new Date().toISOString();
+  if (resumedSessionId) {
+    for (const candidate of registry.records) {
+      if (
+        candidate.id !== id &&
+        !candidate.released &&
+        candidate.workspace === record.workspace &&
+        candidate.sessionId === resumedSessionId
+      ) {
+        candidate.released = true;
+        candidate.lastSeenAt = now;
+      }
+    }
   }
 
   Object.assign(record, updates);
   record.released = false;
-  record.lastSeenAt = new Date().toISOString();
+  record.lastSeenAt = now;
   saveRegistry(registry);
   return record;
 }

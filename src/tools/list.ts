@@ -42,6 +42,10 @@ export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgen
     liveDescription: liveAgent?.description ?? null,
     liveTool: liveAgent?.tool ?? null,
     liveTag: liveAgent?.tag ?? null,
+    reportEvidence: {
+      required: Boolean(record.requireReport),
+      ...(record.dispatchAt ? { dispatchAt: record.dispatchAt } : {}),
+    },
   };
 }
 
@@ -212,6 +216,14 @@ export function registerStatusTool(server: any) {
           stateBreakdown,
           managedLostCount: reconciled.filter((record) => record.state === "managed_lost").length,
           managedReleasedCount: workspaceRecords.filter((record) => record.released).length,
+          reportEvidence: reconciled
+            .filter((record) => record.requireReport)
+            .map((record) => ({
+              id: record.id,
+              hcomName: record.hcomName,
+              state: record.state,
+              dispatchAt: record.dispatchAt ?? null,
+            })),
         };
 
         return {

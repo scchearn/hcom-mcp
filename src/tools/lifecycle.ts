@@ -1,13 +1,16 @@
 import { z } from "zod";
-import {
-  canonicalizeAgentName,
-  execHcom,
-  findLiveAgentByIdentifier,
-  listHcomAgents,
-  resolveCallerName,
-} from "../hcom.js";
-import { getOwnedRecordsByWorkspace, updateRecordState } from "../registry.js";
+import * as hcom from "../hcom.js";
+import * as registry from "../registry.js";
 import type { RegistryRecord, HcomAgent } from "../types.js";
+import {
+  eventTimeMs,
+  eventTimestamp,
+  isAgentMessageEvent,
+  isInboundDispatchEvent,
+  messageFields,
+  newestEvent,
+  parseHcomEvents,
+} from "../events.js";
 import {
   E_AGENT_NOT_FOUND,
   E_KILL_FAILED,
@@ -21,74 +24,97 @@ import {
   toolError,
 } from "../errors.js";
 
+const { canonicalizeAgentName, execHcom, findLiveAgentByIdentifier, listHcomAgents, resolveCallerName } = hcom;
+const { getOwnedRecordsByWorkspace, updateRecordState } = registry;
+
 function formatManagedNames(names: Array<string | undefined>) {
   const filtered = names.filter(Boolean);
   return filtered.length > 0 ? filtered.join(", ") : "none";
 }
 
-interface LifecycleEvent {
-  type?: string;
-  ts?: string;
-  timestamp?: string;
-  data?: Record<string, unknown>;
+export interface ReportGateEvidence {
+  received: boolean;
+  baselineDispatchAt: string;
+  effectiveDispatchAt: string;
+  latestDispatchAt?: string;
+  latestDispatchIntent?: string;
+  reportAt?: string;
+  reportId?: number;
+  reason?: string;
 }
 
-function parseLifecycleEvents(stdout: string): LifecycleEvent[] {
-  return stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        const event = JSON.parse(line) as LifecycleEvent;
-        return event && typeof event === "object" ? [event] : [];
-      } catch {
-        return [];
-      }
-    });
-}
-
-function eventTimeMs(event: LifecycleEvent): number | null {
-  const raw = event.ts ?? event.timestamp;
-  if (!raw) return null;
-  const numeric = Number(raw);
-  if (Number.isFinite(numeric)) return numeric > 10_000_000_000 ? numeric : numeric * 1000;
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-async function reportReceivedAfterDispatch(
+export async function reportReceivedAfterDispatch(
   record: RegistryRecord,
   name: string,
-): Promise<{ received: boolean; reason?: string }> {
-  const dispatchAt = record.dispatchAt ?? record.createdAt;
-  const result = await execHcom([
+): Promise<ReportGateEvidence> {
+  const baselineDispatchAt = record.dispatchAt ?? record.createdAt;
+  const inboundResult = await execHcom([
     "events",
     "--last",
     "1000",
-    "--agent",
-    name,
     "--type",
     "message",
-    "--after",
-    dispatchAt,
+    "--mention",
+    name,
   ]);
-  if (result.exitCode !== 0) {
+  if (inboundResult.exitCode !== 0) {
     return {
       received: false,
-      reason: result.stderr || result.stdout || "hcom events returned no verification result",
+      baselineDispatchAt,
+      effectiveDispatchAt: baselineDispatchAt,
+      reason: inboundResult.stderr || inboundResult.stdout || "hcom inbound event query failed",
     };
   }
 
-  const dispatchMs = Date.parse(dispatchAt);
-  const received = parseLifecycleEvents(result.stdout).some((event) => {
-    if (event.type !== "message") return false;
-    const from = event.data?.from;
-    if (from !== name) return false;
-    const timestamp = eventTimeMs(event);
-    return timestamp === null || !Number.isFinite(dispatchMs) || timestamp >= dispatchMs;
-  });
-  return { received };
+  const inboundEvents = parseHcomEvents(inboundResult.stdout);
+  const latestDispatch = newestEvent(
+    inboundEvents.filter((event) => isInboundDispatchEvent(event, name)),
+  );
+  const baselineMs = eventTimeMs(baselineDispatchAt);
+  const latestDispatchMs = latestDispatch ? eventTimeMs(latestDispatch) : null;
+  const effectiveDispatchMs = [baselineMs, latestDispatchMs]
+    .filter((value): value is number => value !== null)
+    .reduce((latest, value) => Math.max(latest, value), 0);
+  const effectiveDispatchAt = effectiveDispatchMs > 0
+    ? new Date(effectiveDispatchMs).toISOString()
+    : baselineDispatchAt;
+
+  const outboundResult = await execHcom([
+    "events",
+    "--last",
+    "1000",
+    "--type",
+    "message",
+    "--agent",
+    name,
+    "--after",
+    effectiveDispatchAt,
+  ]);
+  if (outboundResult.exitCode !== 0) {
+    return {
+      received: false,
+      baselineDispatchAt,
+      effectiveDispatchAt,
+      ...(latestDispatch ? { latestDispatchAt: eventTimestamp(latestDispatch), latestDispatchIntent: messageFields(latestDispatch).intent } : {}),
+      reason: outboundResult.stderr || outboundResult.stdout || "hcom outbound event query failed",
+    };
+  }
+
+  const report = newestEvent(
+    parseHcomEvents(outboundResult.stdout).filter(
+      (event) => {
+        const timestamp = eventTimeMs(event);
+        return effectiveDispatchMs > 0 && timestamp !== null && timestamp >= effectiveDispatchMs && isAgentMessageEvent(event, name);
+      },
+    ),
+  );
+  return {
+    received: Boolean(report),
+    baselineDispatchAt,
+    effectiveDispatchAt,
+    ...(latestDispatch ? { latestDispatchAt: eventTimestamp(latestDispatch), latestDispatchIntent: messageFields(latestDispatch).intent } : {}),
+    ...(report ? { reportAt: eventTimestamp(report), reportId: report.id } : {}),
+  };
 }
 
 /**
@@ -264,13 +290,21 @@ export async function resolveTeardownTargets(
 export async function runTeardown(
   targets: { record: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }[],
   action: "stop" | "kill",
-  options: { force?: boolean } = {},
+  options: { force?: boolean; updateState?: boolean; allowMissing?: boolean } = {},
 ): Promise<{ name: string; ok: boolean; text: string }[]> {
   const results: { name: string; ok: boolean; text: string }[] = [];
 
   for (const { record, liveAgent, canonicalName } of targets) {
     const isLost = record.state === "managed_lost" || record.state === "adopted_lost";
     if (isLost && !liveAgent) {
+      if (options.allowMissing) {
+        results.push({
+          name: canonicalName,
+          ok: true,
+          text: `Agent "${canonicalName}" was already absent from hcom.`,
+        });
+        continue;
+      }
       results.push({
         name: canonicalName,
         ok: false,
@@ -297,6 +331,14 @@ export async function runTeardown(
     const result = await execHcom(args);
     if (result.exitCode !== 0) {
       if ((result.stderr || result.stdout).toLowerCase().includes("not found")) {
+        if (options.allowMissing) {
+          results.push({
+            name: canonicalName,
+            ok: true,
+            text: `Agent "${canonicalName}" was already absent from hcom.`,
+          });
+          continue;
+        }
         const lostState = record.state.startsWith("adopted_") ? "adopted_lost" : "managed_lost";
         updateRecordState(record.id, lostState);
         results.push({
@@ -314,8 +356,10 @@ export async function runTeardown(
       continue;
     }
 
-    const newState = record.state.startsWith("adopted_") ? "adopted_stopped" : "managed_stopped";
-    updateRecordState(record.id, newState);
+    if (options.updateState !== false) {
+      const newState = record.state.startsWith("adopted_") ? "adopted_stopped" : "managed_stopped";
+      updateRecordState(record.id, newState);
+    }
     const adoptedLabel = record.state.startsWith("adopted_") ? " (adopted agent)" : "";
     results.push({
       name: canonicalName,

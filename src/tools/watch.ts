@@ -10,37 +10,35 @@ import {
 import { getOwnedRecordsByWorkspace } from "../registry.js";
 import type { HcomAgent, RegistryRecord } from "../types.js";
 import { E_INTERNAL, E_NO_SENDER, internalError, toolError } from "../errors.js";
+import {
+  eventData,
+  eventTimeMs,
+  eventTimestamp,
+  isAgentMessageEvent,
+  isInboundDispatchEvent,
+  messageFields,
+  newestEvent,
+  parseHcomEvents,
+  type HcomEvent,
+} from "../events.js";
 
 const WatchModeEnum = z.enum(["poll", "subscribe"]);
 const WEDGED_QUEUE_THRESHOLD_SEC = 600;
 
-interface LifeEvent {
-  action?: string;
-  status?: string;
-  ts?: string;
-}
-
-interface MessageEvent {
-  from?: string;
-  text?: string;
-  ts?: string;
-  type?: string;
-  instance?: string;
-  data?: Record<string, unknown>;
-}
-
-interface HcomEvent {
-  type?: string;
-  instance?: string;
-  ts?: string;
-  id?: number;
-  data?: Record<string, unknown>;
-}
-
 interface WedgedQueueEvidence {
   evidenceTimestamp: string;
   ageSeconds: number;
+  dispatchIntent: string | null;
   termTail: string;
+}
+
+interface ReportEvidence {
+  required: boolean;
+  dispatchAt: string | null;
+  latestDispatchAt: string | null;
+  latestDispatchIntent: string | null;
+  reportReceived: boolean | null;
+  reportAt: string | null;
 }
 
 /**
@@ -48,83 +46,20 @@ interface WedgedQueueEvidence {
  * Returns [] for non-JSON output so a CLI format drift degrades to "no
  * events" instead of a hard error.
  */
-function parseEventLines<T>(stdout: string): T[] {
-  return stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => parseHcomJson<T>(line))
-    .filter((e): e is T => e !== null);
+async function fetchAgentEvents(name: string): Promise<HcomEvent[]> {
+  const [life, message] = await Promise.all([
+    execHcom(["events", "--last", "200", "--type", "life", "--agent", name]),
+    execHcom(["events", "--last", "200", "--type", "message", "--agent", name]),
+  ]);
+  return [life, message]
+    .filter((result) => result.exitCode === 0)
+    .flatMap((result) => parseHcomEvents(result.stdout));
 }
 
-/**
- * Fetch recent life events for one agent. One CLI call per agent; the
- * per-agent filter keeps the payload small and the join honest.
- */
-async function fetchLifeEvents(name: string): Promise<LifeEvent[]> {
-  const result = await execHcom(["events", "--last", "20", "--type", "life", "--agent", name]);
+async function fetchInboundEvents(name: string): Promise<HcomEvent[]> {
+  const result = await execHcom(["events", "--last", "200", "--type", "message", "--mention", name]);
   if (result.exitCode !== 0) return [];
-  return parseEventLines<LifeEvent>(result.stdout);
-}
-
-/**
- * Fetch the most recent message sent BY the agent (its last report to the
- * hub). Returns undefined when there is no message event in the window.
- */
-async function fetchLastMessage(name: string): Promise<MessageEvent | undefined> {
-  const result = await execHcom(["events", "--last", "50", "--type", "message", "--agent", name]);
-  if (result.exitCode !== 0) return undefined;
-  const events = parseEventLines<MessageEvent>(result.stdout);
-  return normalizeMessageEvent(events[0]);
-}
-
-async function fetchRecentEvents(name: string): Promise<HcomEvent[]> {
-  const result = await execHcom(["events", "--last", "200", "--agent", name]);
-  if (result.exitCode !== 0) return [];
-  return parseEventLines<HcomEvent>(result.stdout);
-}
-
-function normalizeMessageEvent(event: MessageEvent | undefined): MessageEvent | undefined {
-  if (!event) return undefined;
-  const data = event.data ?? event as Record<string, unknown>;
-  return {
-    from: typeof data.from === "string" ? data.from : undefined,
-    text: typeof data.text === "string" ? data.text : undefined,
-    ts: event.ts,
-    type: event.type,
-    instance: event.instance,
-    data: event.data,
-  };
-}
-
-function eventData(event: HcomEvent): Record<string, unknown> {
-  return event.data ?? {};
-}
-
-function eventTimeMs(event: HcomEvent): number | null {
-  const raw = event.ts;
-  if (!raw) return null;
-  const numeric = Number(raw);
-  if (Number.isFinite(numeric)) return numeric > 10_000_000_000 ? numeric : numeric * 1000;
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function messageFields(event: HcomEvent): { from?: string; text?: string; intent?: string } {
-  const data = eventData(event);
-  return {
-    from: typeof data.from === "string" ? data.from : undefined,
-    text: typeof data.text === "string" ? data.text : undefined,
-    intent: typeof data.intent === "string" ? data.intent : undefined,
-  };
-}
-
-function isActionableInboundMessage(event: HcomEvent, agentName: string): boolean {
-  if (event.type !== "message") return false;
-  const { from, intent } = messageFields(event);
-  if (!from || from === agentName) return false;
-  const data = eventData(event);
-  return intent === "request" || data.dispatch === true || data.actionable === true;
+  return parseHcomEvents(result.stdout);
 }
 
 function isAgentConsumptionEvent(event: HcomEvent, agentName: string, dispatchMs: number): boolean {
@@ -133,7 +68,7 @@ function isAgentConsumptionEvent(event: HcomEvent, agentName: string, dispatchMs
   const data = eventData(event);
 
   if (event.type === "message") {
-    return messageFields(event).from === agentName;
+    return isAgentMessageEvent(event, agentName);
   }
   if (event.type !== "status") return false;
   if (event.instance && event.instance !== agentName) return false;
@@ -157,19 +92,20 @@ async function fetchTermTail(name: string): Promise<string> {
 
 async function detectWedgedQueue(
   live: HcomAgent,
-  events: HcomEvent[],
+  agentEvents: HcomEvent[],
+  inboundEvents: HcomEvent[],
 ): Promise<WedgedQueueEvidence | undefined> {
   if (live.tool !== "opencode" || live.status !== "listening") return undefined;
 
-  const dispatches = events
-    .filter((event) => isActionableInboundMessage(event, live.base_name))
+  const dispatches = inboundEvents
+    .filter((event) => isInboundDispatchEvent(event, live.base_name))
     .map((event) => ({ event, timestamp: eventTimeMs(event) }))
     .filter((entry): entry is { event: HcomEvent; timestamp: number } => entry.timestamp !== null)
     .sort((a, b) => b.timestamp - a.timestamp);
   const latestDispatch = dispatches[0];
   if (!latestDispatch) return undefined;
 
-  if (events.some((event) => isAgentConsumptionEvent(event, live.base_name, latestDispatch.timestamp))) {
+  if (agentEvents.some((event) => isAgentConsumptionEvent(event, live.base_name, latestDispatch.timestamp))) {
     return undefined;
   }
 
@@ -177,9 +113,45 @@ async function detectWedgedQueue(
   if (ageSeconds < WEDGED_QUEUE_THRESHOLD_SEC) return undefined;
 
   return {
-    evidenceTimestamp: latestDispatch.event.ts!,
+    evidenceTimestamp: eventTimestamp(latestDispatch.event) ?? new Date(latestDispatch.timestamp).toISOString(),
     ageSeconds,
+    dispatchIntent: messageFields(latestDispatch.event).intent ?? null,
     termTail: await fetchTermTail(live.base_name),
+  };
+}
+
+function buildReportEvidence(
+  record: RegistryRecord,
+  agentEvents: HcomEvent[],
+  inboundEvents: HcomEvent[],
+): ReportEvidence {
+  const baseline = record.dispatchAt ?? record.createdAt ?? null;
+  const baselineMs = eventTimeMs(baseline ?? undefined);
+  const latestDispatch = newestEvent(
+    inboundEvents.filter((event) => isInboundDispatchEvent(event, record.hcomName ?? "")),
+  );
+  const latestDispatchMs = latestDispatch ? eventTimeMs(latestDispatch) : null;
+  const effectiveDispatchMs = [baselineMs, latestDispatchMs]
+    .filter((value): value is number => value !== null)
+    .reduce((latest, value) => Math.max(latest, value), 0);
+  const report = record.requireReport
+    ? newestEvent(
+        agentEvents.filter(
+          (event) => {
+            const timestamp = eventTimeMs(event);
+            return effectiveDispatchMs > 0 && timestamp !== null && timestamp >= effectiveDispatchMs && isAgentMessageEvent(event, record.hcomName ?? "");
+          },
+        ),
+      )
+    : undefined;
+
+  return {
+    required: record.requireReport ?? false,
+    dispatchAt: baseline,
+    latestDispatchAt: latestDispatch ? eventTimestamp(latestDispatch) ?? null : null,
+    latestDispatchIntent: latestDispatch ? messageFields(latestDispatch).intent ?? null : null,
+    reportReceived: record.requireReport ? Boolean(report) : null,
+    reportAt: report ? eventTimestamp(report) ?? null : null,
   };
 }
 
@@ -206,6 +178,7 @@ export async function buildWatchLine(
   flags: string[];
   lastLifeEvent: string | null;
   lastMessage: string | null;
+  report: ReportEvidence;
   wedgedQueue?: WedgedQueueEvidence;
 }> {
   const live = findLiveAgentByIdentifier(record.hcomName ?? "", liveAgents);
@@ -221,18 +194,20 @@ export async function buildWatchLine(
       flags,
       lastLifeEvent: null,
       lastMessage: null,
+      report: buildReportEvidence(record, [], []),
     };
   }
 
   const age = live.status_age_seconds ?? 0;
   const unread = live.unread_count ?? 0;
 
-  const recentEvents = live.tool === "opencode" ? await fetchRecentEvents(live.base_name) : undefined;
-  const lastMessage = recentEvents
-    ? normalizeMessageEvent(
-        recentEvents.find((event) => event.type === "message" && messageFields(event).from === live.base_name) as MessageEvent | undefined,
-      )
-    : await fetchLastMessage(live.base_name);
+  const agentEvents = await fetchAgentEvents(live.base_name);
+  const inboundEvents = live.tool === "opencode" || record.requireReport
+    ? await fetchInboundEvents(live.base_name)
+    : [];
+  const lastMessage = newestEvent(
+    agentEvents.filter((event) => isAgentMessageEvent(event, live.base_name)),
+  );
 
   if (live.status === "blocked") {
     flags.push("blocked");
@@ -249,23 +224,18 @@ export async function buildWatchLine(
     flags.push("unreported");
   }
 
-  const lifeEvents = recentEvents
-    ? recentEvents.filter((event) => event.type === "life")
-    : await fetchLifeEvents(live.base_name);
-  let lastLife: string | null;
-  if (recentEvents) {
-    const life = (lifeEvents as HcomEvent[])[0];
-    lastLife = String(eventData(life ?? {}).action ?? eventData(life ?? {}).status ?? "") || null;
-  } else {
-    const life = (lifeEvents as LifeEvent[])[0];
-    lastLife = life?.action ?? life?.status ?? null;
-  }
+  const life = newestEvent(
+    agentEvents.filter((event) => event.type === "life" || (event.type === undefined && "action" in eventData(event))),
+  );
+  const lastLife = String(eventData(life ?? {}).action ?? eventData(life ?? {}).status ?? "") || null;
 
-  const wedgedQueue = recentEvents ? await detectWedgedQueue(live, recentEvents) : undefined;
+  const wedgedQueue = await detectWedgedQueue(live, agentEvents, inboundEvents);
   if (wedgedQueue) flags.push("wedged_queue");
 
+  const report = buildReportEvidence(record, agentEvents, inboundEvents);
+
   const lastMessageText = lastMessage
-    ? `${lastMessage.from ?? "?"}: ${(lastMessage.text ?? "").slice(0, 80)}`
+    ? `${messageFields(lastMessage).from ?? "?"}: ${(messageFields(lastMessage).text ?? "").slice(0, 80)}`
     : null;
 
   return {
@@ -276,6 +246,7 @@ export async function buildWatchLine(
     flags,
     lastLifeEvent: lastLife,
     lastMessage: lastMessageText,
+    report,
     ...(wedgedQueue ? { wedgedQueue } : {}),
   };
 }
@@ -290,7 +261,7 @@ export async function buildWatchLine(
 export function registerWatchAgentsTool(server: any) {
   server.tool(
     "watch_agents",
-    "Supervise owned agents between spawn and kill. Poll mode returns a summarized snapshot (one line per agent) with derived flags: blocked (needs human), silent_finisher (listening past report_timeout with no dispatch), stalled (active past report_timeout), lost (record present, live gone), unreported (unconsumed messages), wedged_queue (OpenCode listening with an unresolved request and no consumption evidence for >=600 seconds, including a terminal tail). Subscribe mode installs hcom event subscriptions that wake the hub via hcom message. Reporting only — never auto-kills or auto-rescues. Poll returns { mode, agents, summary }; subscribe returns { mode, caller, subscriptions, total, note }. Preconditions: subscribe mode requires sender identity (see sender_name). Related: unblock (rescue blocked), stop/kill (act on flags).",
+    "Supervise owned agents between spawn and kill. Poll mode returns a summarized snapshot (one line per agent) with derived flags: blocked (needs human), silent_finisher (listening past report_timeout with no dispatch), stalled (active past report_timeout), lost (record present, live gone), unreported (unconsumed messages), wedged_queue (OpenCode listening with an unresolved inbound non-ack message and no consumption evidence for >=600 seconds, including a terminal tail). Each line also exposes report gate, dispatch, and report evidence. Subscribe mode installs hcom event subscriptions that wake the hub via hcom message. Reporting only — never auto-kills or auto-rescues. Poll returns { mode, agents, summary }; subscribe returns { mode, caller, subscriptions, total, note }. Preconditions: subscribe mode requires sender identity (see sender_name). Related: unblock (rescue blocked), stop/kill (act on flags).",
     {
       names: z.array(z.string()).optional().describe("Agent names to watch. Omit to watch all owned records in the workspace."),
       tag: z.string().optional().describe("Watch only records whose live agent carries this tag."),
@@ -374,7 +345,7 @@ export function registerWatchAgentsTool(server: any) {
         }
 
         // Poll mode: one line per agent, summarized. Sequential loop, not
-        // Promise.all: each line spawns up to 2 hcom events subprocesses, and
+        // Promise.all: each line spawns up to 3 hcom events subprocesses, and
         // an unbounded fan-out over a large fleet would saturate the CLI.
         const lines: Awaited<ReturnType<typeof buildWatchLine>>[] = [];
         for (const record of scoped) {
