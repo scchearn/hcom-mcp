@@ -141,11 +141,16 @@ function saveRegistry(registry: Registry): void {
 /**
  * Add a new ownership record.
  */
-export function addRecord(record: Omit<RegistryRecord, "id" | "createdAt" | "lastSeenAt">): RegistryRecord {
+export function addRecord(
+  record: Omit<RegistryRecord, "id" | "createdAt" | "lastSeenAt" | "requireReport"> & {
+    requireReport?: boolean;
+  },
+): RegistryRecord {
   const registry = loadRegistry();
   const now = new Date().toISOString();
   const full: RegistryRecord = {
     ...record,
+    requireReport: record.requireReport ?? false,
     id: randomUUID(),
     createdAt: now,
     lastSeenAt: now,
@@ -239,6 +244,8 @@ export function upsertResumedRecord(
     launchMode?: LaunchMode;
     state?: OwnershipState;
     resumedFrom?: string;
+    requireReport?: boolean;
+    dispatchAt?: string;
   },
 ): RegistryRecord | null {
   const registry = loadRegistry();
@@ -329,6 +336,7 @@ export function adoptRecord(params: {
     createdAt: now,
     lastSeenAt: now,
     released: false,
+    requireReport: false,
   };
   registry.records.push(full);
   saveRegistry(registry);

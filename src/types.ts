@@ -232,6 +232,12 @@ export const RegistryRecordSchema = z.object({
   createdAt: z.string(),
   lastSeenAt: z.string(),
   released: z.boolean().default(false),
+  // Report promise from the launch contract. Missing legacy records are
+  // treated as fire-and-forget for compatibility.
+  requireReport: z.boolean().default(false),
+  // Timestamp at which the task was dispatched to the agent. Older records
+  // fall back to createdAt when the report brake evaluates them.
+  dispatchAt: z.string().optional(),
   // Spawn verification outcome (spawn_and_verify / launch_topology verify).
   verifyOutcome: z.enum(["ready", "failed", "timeout", "blocked"]).optional(),
   verifyLatencyMs: z.number().optional(),

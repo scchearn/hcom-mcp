@@ -311,6 +311,8 @@ async function runHeadlessOpenCodeResume(
     state: activeStateFor(source.record),
     launchMode: "headless",
     resumedFrom: target,
+    requireReport: source.record.requireReport ?? false,
+    dispatchAt: new Date(startedAtMs).toISOString(),
   });
   if (!record) return toolError(E_LAUNCH_FAILED, `Retained ownership record "${source.record.id}" disappeared during resume.`);
 
@@ -416,6 +418,8 @@ async function runResumeFork(
       launchMode: options.headless ? "headless" : "headed",
       state: activeStateFor(source.record),
       resumedFrom: target,
+      requireReport: source.record.requireReport ?? false,
+      dispatchAt: new Date(startedAtMs).toISOString(),
     });
     if (!updated) {
       return toolError(E_LAUNCH_FAILED, `Retained ownership record "${source.record.id}" disappeared during resume.`);
@@ -435,6 +439,8 @@ async function runResumeFork(
       released: false,
       launchedBy: caller,
       resumedFrom: target,
+      requireReport: source.record?.requireReport ?? false,
+      dispatchAt: new Date(startedAtMs).toISOString(),
       ...(source.sessionId ? { sessionId: source.sessionId } : {}),
     });
   }

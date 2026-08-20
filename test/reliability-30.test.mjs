@@ -136,16 +136,18 @@ test('headless OpenCode resume runs the retained session directly and updates it
   assert.match(commandCalls[0].options.env.HCOM_PROCESS_ID, /^hcom-mcp-resume-waka-/);
   assert.equal(calls.some((args) => args[0] === 'r'), false);
   assert.equal(calls.some((args) => args[0] === 'events'), false);
-  assert.deepEqual(updates, [{
-    id: 'rec-source',
-    update: {
-      hcomName: 'waka',
-      sessionId: 'ses_retain123',
-      state: 'managed_active',
-      launchMode: 'headless',
-      resumedFrom: 'waka',
-    },
-  }]);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].id, 'rec-source');
+  assert.deepEqual({ ...updates[0].update, dispatchAt: undefined }, {
+    hcomName: 'waka',
+    sessionId: 'ses_retain123',
+    state: 'managed_active',
+    launchMode: 'headless',
+    resumedFrom: 'waka',
+    requireReport: false,
+    dispatchAt: undefined,
+  });
+  assert.match(updates[0].update.dispatchAt, /^2026-/);
 });
 
 test('headless OpenCode resume refuses when no retained session id is available', async (t) => {

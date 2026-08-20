@@ -550,7 +550,7 @@ test('unblock keeps the record blocked when the agent is still blocked after one
 
 // --- spawn_and_verify ---
 
-function mockVerifyDeps(t, { execHcom, runUnblock, allowlist, config }) {
+function mockVerifyDeps(t, { execHcom, runUnblock, allowlist, config, addedRecords }) {
   const stateUpdates = [];
   const verifyUpdates = [];
   t.mock.module('../dist/hcom.js', {
@@ -566,7 +566,10 @@ function mockVerifyDeps(t, { execHcom, runUnblock, allowlist, config }) {
   });
   t.mock.module('../dist/registry.js', {
     namedExports: {
-      addRecord: (record) => ({ ...record, id: 'record-1' }),
+      addRecord: (record) => {
+        addedRecords?.push(record);
+        return { ...record, id: 'record-1' };
+      },
       removeRecords: () => {},
       updateRecordState: (id, state) => {
         stateUpdates.push({ id, state });
@@ -596,7 +599,7 @@ function mockVerifyDeps(t, { execHcom, runUnblock, allowlist, config }) {
       namedExports: { runUnblock },
     });
   }
-  return { stateUpdates, verifyUpdates };
+  return { stateUpdates, verifyUpdates, addedRecords };
 }
 
 test('spawn_and_verify reports ready and persists the outcome', async (t) => {
@@ -632,6 +635,35 @@ test('spawn_and_verify reports ready and persists the outcome', async (t) => {
   assert.deepEqual(stateUpdates, [{ id: 'record-1', state: 'managed_active' }]);
   assert.equal(verifyUpdates.length, 1);
   assert.equal(verifyUpdates[0].info.outcome, 'ready');
+});
+
+test('spawn_and_verify persists require_report when requested', async (t) => {
+  const addedRecords = [];
+  const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'launch') {
+      return { exitCode: 0, stdout: '{"data":{"status":"ready"}}', stderr: '' };
+    }
+    if (args[0] === 'opencode') {
+      return { exitCode: 0, stdout: 'Names: waka\nBatch id: batch-report\n', stderr: '' };
+    }
+    throw new Error(`unexpected args: ${args.join(' ')}`);
+  };
+  mockVerifyDeps(t, { execHcom, addedRecords });
+
+  const { registerSpawnAndVerifyTool } = await loadModule('tools/launch.js');
+  const server = createFakeServer();
+  registerSpawnAndVerifyTool(server);
+  const response = await server.handlers.get('spawn_and_verify')({
+    harness: 'opencode',
+    model: 'opencode/deepseek-v4-flash-free',
+    require_report: true,
+    sender_name: 'nora',
+  });
+
+  assert.equal(response.isError, undefined);
+  assert.equal(addedRecords.length, 1);
+  assert.equal(addedRecords[0].requireReport, true);
+  assert.match(addedRecords[0].dispatchAt, /^2026-/);
 });
 
 test('spawn_and_verify classifies a blocked agent and includes the screen tail', async (t) => {
@@ -787,6 +819,7 @@ test('spawn_and_verify errors when sender_name is missing', async (t) => {
 
 test('launch_topology with verify=true gates each agent and reports outcomes', async (t) => {
   let launchCount = 0;
+  const addedRecords = [];
   const execHcom = async (args) => {
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 0, stdout: '{"data":{"status":"ready"}}', stderr: '' };
@@ -803,6 +836,7 @@ test('launch_topology with verify=true gates each agent and reports outcomes', a
   };
   const { stateUpdates } = mockVerifyDeps(t, {
     execHcom,
+    addedRecords,
     config: {
       agentPresets: {
         reviewer: {
@@ -831,6 +865,7 @@ test('launch_topology with verify=true gates each agent and reports outcomes', a
     workspace: '/repo',
     sender_name: 'nora',
     verify: true,
+    require_report: true,
   });
 
   assert.equal(response.isError, undefined);
@@ -840,6 +875,8 @@ test('launch_topology with verify=true gates each agent and reports outcomes', a
   assert.ok(payload.verifyOutcomes.every((o) => o.outcome === 'ready'));
   assert.equal(stateUpdates.length, 2);
   assert.ok(stateUpdates.every((u) => u.state === 'managed_active'));
+  assert.equal(addedRecords.length, 2);
+  assert.ok(addedRecords.every((record) => record.requireReport === true));
 });
 
 test('launch_topology without verify does not gate', async (t) => {

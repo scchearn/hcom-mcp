@@ -13,6 +13,7 @@ import {
   E_KILL_FAILED,
   E_NO_SENDER,
   E_NOT_MANAGED,
+  E_REPORT_REQUIRED,
   E_SELF_PROTECTION,
   E_STOP_FAILED,
   E_TARGET_REQUIRED,
@@ -23,6 +24,71 @@ import {
 function formatManagedNames(names: Array<string | undefined>) {
   const filtered = names.filter(Boolean);
   return filtered.length > 0 ? filtered.join(", ") : "none";
+}
+
+interface LifecycleEvent {
+  type?: string;
+  ts?: string;
+  timestamp?: string;
+  data?: Record<string, unknown>;
+}
+
+function parseLifecycleEvents(stdout: string): LifecycleEvent[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const event = JSON.parse(line) as LifecycleEvent;
+        return event && typeof event === "object" ? [event] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function eventTimeMs(event: LifecycleEvent): number | null {
+  const raw = event.ts ?? event.timestamp;
+  if (!raw) return null;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) return numeric > 10_000_000_000 ? numeric : numeric * 1000;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function reportReceivedAfterDispatch(
+  record: RegistryRecord,
+  name: string,
+): Promise<{ received: boolean; reason?: string }> {
+  const dispatchAt = record.dispatchAt ?? record.createdAt;
+  const result = await execHcom([
+    "events",
+    "--last",
+    "1000",
+    "--agent",
+    name,
+    "--type",
+    "message",
+    "--after",
+    dispatchAt,
+  ]);
+  if (result.exitCode !== 0) {
+    return {
+      received: false,
+      reason: result.stderr || result.stdout || "hcom events returned no verification result",
+    };
+  }
+
+  const dispatchMs = Date.parse(dispatchAt);
+  const received = parseLifecycleEvents(result.stdout).some((event) => {
+    if (event.type !== "message") return false;
+    const from = event.data?.from;
+    if (from !== name) return false;
+    const timestamp = eventTimeMs(event);
+    return timestamp === null || !Number.isFinite(dispatchMs) || timestamp >= dispatchMs;
+  });
+  return { received };
 }
 
 /**
@@ -198,6 +264,7 @@ export async function resolveTeardownTargets(
 export async function runTeardown(
   targets: { record: RegistryRecord; liveAgent: HcomAgent | null; canonicalName: string }[],
   action: "stop" | "kill",
+  options: { force?: boolean } = {},
 ): Promise<{ name: string; ok: boolean; text: string }[]> {
   const results: { name: string; ok: boolean; text: string }[] = [];
 
@@ -210,6 +277,20 @@ export async function runTeardown(
         text: `[${E_AGENT_NOT_FOUND}] Agent "${canonicalName}" has a stale record but is no longer live in hcom.`,
       });
       continue;
+    }
+
+    if (record.requireReport && !options.force) {
+      const report = await reportReceivedAfterDispatch(record, canonicalName);
+      if (!report.received) {
+        const dispatchAt = record.dispatchAt ?? record.createdAt;
+        const reason = report.reason ? ` Verification failed: ${report.reason}.` : " No agent-originated message was received after dispatch.";
+        results.push({
+          name: canonicalName,
+          ok: false,
+          text: `[${E_REPORT_REQUIRED}] Refusing to ${action} agent "${canonicalName}": require_report=true.${reason} Inspect the report/transcript or retry with force=true. Dispatch: ${dispatchAt}.`,
+        });
+        continue;
+      }
     }
 
     const args = action === "kill" ? ["kill", canonicalName, "--go"] : ["stop", canonicalName];
@@ -254,16 +335,17 @@ export function registerLifecycleTools(server: any) {
     {
       names: z.array(z.string()).optional().describe("hcom agent names to stop. Provide names or tag, not both."),
       tag: z.string().optional().describe("Stop every owned agent carrying this tag (fan out over owned records only)."),
+      force: z.boolean().optional().default(false).describe("Bypass only the require_report close gate; ownership and hub self-protection still apply (default: false)."),
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
     },
-    async ({ names, tag, workspace, sender_name }: { names?: string[]; tag?: string; workspace?: string; sender_name?: string }) => {
+    async ({ names, tag, force, workspace, sender_name }: { names?: string[]; tag?: string; force?: boolean; workspace?: string; sender_name?: string }) => {
       const resolution = await resolveTeardownTargets(names, tag, "stop", sender_name, workspace);
       if (!resolution.ok) return resolution.response;
 
       const { cwd, targets, failures } = resolution;
 
-      const results = await runTeardown(targets, "stop");
+      const results = await runTeardown(targets, "stop", { force: force ?? false });
 
       const payload: Record<string, unknown> = {
         workspace: cwd,
@@ -289,16 +371,17 @@ export function registerLifecycleTools(server: any) {
     {
       names: z.array(z.string()).optional().describe("hcom agent names to kill. Provide names or tag, not both."),
       tag: z.string().optional().describe("Kill every owned agent carrying this tag (fan out over owned records only)."),
+      force: z.boolean().optional().default(false).describe("Bypass only the require_report close gate; ownership and hub self-protection still apply (default: false)."),
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace); ownership records are scoped per workspace, so a mismatched workspace reports the agent as unmanaged."),
       sender_name: z.string().optional().describe("Sender identity used for hub self-protection. REQUIRED for HTTP or unbound MCP callers: auto-resolution via 'hcom list self' never succeeds there, and the call fails with E_NO_SENDER. Bound hcom sessions may omit it."),
     },
-    async ({ names, tag, workspace, sender_name }: { names?: string[]; tag?: string; workspace?: string; sender_name?: string }) => {
+    async ({ names, tag, force, workspace, sender_name }: { names?: string[]; tag?: string; force?: boolean; workspace?: string; sender_name?: string }) => {
       const resolution = await resolveTeardownTargets(names, tag, "kill", sender_name, workspace);
       if (!resolution.ok) return resolution.response;
 
       const { cwd, targets, failures } = resolution;
 
-      const results = await runTeardown(targets, "kill");
+      const results = await runTeardown(targets, "kill", { force: force ?? false });
 
       const payload: Record<string, unknown> = {
         workspace: cwd,
