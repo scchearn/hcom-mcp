@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "npm run build && node --experimental-test-module-mocks --test test/**/*.test.mjs"
+    "test": "npm run build && node --experimental-test-module-mocks --import ./test/helpers/isolate-home.mjs --test test/**/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

@@ -52,6 +52,26 @@ function createFakeServer() {
   };
 }
 
+/**
+ * Hermetic registry for launch-path tests. Without this, launch.js resolves
+ * './registry.js' to the REAL module (loaded statically at the top of this
+ * file with the real homedir), and every successful launch test appended
+ * records to ~/.hcom/mcp/registry.json — that leak produced ~1330 "test-agent"
+ * records in the live registry. Provide every name launch.js imports so the
+ * mocked module links.
+ */
+function mockRegistryWrites(t) {
+  let n = 0;
+  t.mock.module('../dist/registry.js', {
+    namedExports: {
+      addRecord: (record) => ({ ...record, id: `rec-${++n}` }),
+      removeRecords: () => {},
+      updateRecordState: () => null,
+      updateRecordVerify: () => null,
+    },
+  });
+}
+
 test('registerLaunchTool exposes the bare launch name', () => {
   const server = createFakeServer();
   registerLaunchTool(server);
@@ -1509,6 +1529,7 @@ test('bare launch without model or preset returns error', async () => {
 });
 
 test('bare launch with harness + model builds correct command', async (t) => {
+  mockRegistryWrites(t);
   let capturedArgs;
   const mockHarnessModels = {
     claude: ['sonnet', 'haiku'],
@@ -1551,6 +1572,7 @@ test('bare launch with harness + model builds correct command', async (t) => {
 });
 
 test('preset + model override uses the override model', async (t) => {
+  mockRegistryWrites(t);
   const workspace = createWorkspaceConfig({
     agentPresets: {
       researcher: {
@@ -1630,6 +1652,7 @@ test('preset + model override uses the override model', async (t) => {
 });
 
 test('bare launch tag defaults to harness name', async (t) => {
+  mockRegistryWrites(t);
   let capturedArgs;
   const mockHarnessModels = {
     claude: ['sonnet', 'haiku'],
@@ -1666,6 +1689,7 @@ test('bare launch tag defaults to harness name', async (t) => {
 });
 
 test('custom tag overrides default', async (t) => {
+  mockRegistryWrites(t);
   let capturedArgs;
   const mockHarnessModels = {
     claude: ['haiku'],
@@ -1703,6 +1727,7 @@ test('custom tag overrides default', async (t) => {
 });
 
 test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions and reasoning variant', async (t) => {
+  mockRegistryWrites(t);
   const workspace = createWorkspaceConfig({ agentPresets: {}, topologyPresets: {} });
   t.after(() => rmSync(workspace, { recursive: true, force: true }));
   let capturedArgs;
@@ -1776,6 +1801,7 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions 
 });
 
 test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions, no cwd overlay', async (t) => {
+  mockRegistryWrites(t);
   const workspace = createWorkspaceConfig({
     agentPresets: {
       builder: {
@@ -1835,6 +1861,7 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions,
 });
 
 test('claude harness with reasoning xhigh includes --effort xhigh', async (t) => {
+  mockRegistryWrites(t);
   let capturedArgs;
 
   t.mock.module('../dist/hcom.js', {
@@ -1870,6 +1897,7 @@ test('claude harness with reasoning xhigh includes --effort xhigh', async (t) =>
 });
 
 test('no reasoning produces no --variant or --effort flag', async (t) => {
+  mockRegistryWrites(t);
   let capturedArgs;
 
   t.mock.module('../dist/hcom.js', {
@@ -1905,6 +1933,7 @@ test('no reasoning produces no --variant or --effort flag', async (t) => {
 });
 
 test('codex harness with reasoning produces no flag', async (t) => {
+  mockRegistryWrites(t);
   let capturedArgs;
 
   t.mock.module('../dist/hcom.js', {
@@ -1941,6 +1970,7 @@ test('codex harness with reasoning produces no flag', async (t) => {
 });
 
 test('bare launch with reasoning uses correct flag per harness', async (t) => {
+  mockRegistryWrites(t);
   let capturedArgs;
 
   t.mock.module('../dist/hcom.js', {
