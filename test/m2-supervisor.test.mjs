@@ -180,9 +180,9 @@ test('blocked and lost are immediate and never run rescue tiers', async (t) => {
     evidence: makeEvidence({ liveAgent: null }),
     nowMs: BASE + sec(10),
   });
-  // Terminal: closed into lastIncident evidence (m11), not left open.
-  assert.equal(lost.supervision.incident, undefined);
-  assert.equal(lost.supervision.lastIncident.type, 'lost');
+  // Open + attention pending; the close lands on the first quiet sweep.
+  assert.equal(lost.supervision.incident.type, 'lost');
+  assert.equal(lost.supervision.incident.alertsSent, 0);
   assert.equal(lost.tier1, undefined);
 });
 
@@ -195,7 +195,7 @@ test('a cleanly stopped worker is only an incident when a report was promised', 
     evidence: makeEvidence({ liveAgent: null }),
     nowMs: BASE + sec(10),
   });
-  assert.equal(unreported.supervision.lastIncident.type, 'stopped_unreported');
+  assert.equal(unreported.supervision.incident.type, 'stopped_unreported');
 
   const clean = evaluateWorker({
     record: makeRecord({ state: 'managed_stopped', requireReport: false }),

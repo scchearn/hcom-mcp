@@ -343,9 +343,13 @@ test('M5: a dead agent never produces a RECOVERED inform — it classifies lost'
   });
   // No resolution-branch RECOVERED: the agent DIED, it did not recover.
   assert.equal(outcome.inform, undefined);
-  // Terminal: the lost incident is CLOSED into lastIncident evidence (m11).
-  assert.equal(outcome.supervision.incident, undefined);
-  assert.equal(outcome.supervision.lastIncident.type, 'lost');
+  // Open on the alerting sweep; close fires on the first sweep with
+  // nothing left to say (part a).
+  assert.equal(outcome.supervision.incident.type, 'lost');
+  // MAJOR A carry-forward: the burned attention alert stays spent; the
+  // remaining slot fires ONCE, labelled with the new type.
+  assert.equal(outcome.supervision.incident.alertsSent, 1);
+  assert.equal(outcome.notify.level, 'escalation');
 });
 
 test('MAJOR C: a throw during tier2 persists the escalation budget, no double-fire', async (t) => {
@@ -402,4 +406,43 @@ test('MAJOR C: a throw during tier2 persists the escalation budget, no double-fi
   const sendsBefore = sends.filter((a) => a[1] === '@nora').length;
   await runSupervisionSweep({ now: () => BASE + sec(700) });
   assert.equal(sends.filter((a) => a[1] === '@nora').length, sendsBefore);
+});
+
+test('BLOCKER regression: a lost worker alerts exactly twice across six sweeps, then closes', async (t) => {
+  const sends = [];
+  const liveAgents = [];
+  mockHcom(t, { liveAgents, sends });
+  seedRegistry([
+    makeRecord({ id: 'rec-lostloop', state: 'managed_lost', supervision: undefined }),
+  ]);
+
+  const { runSupervisionSweep } = await loadSupervisor();
+  // Six sweeps at 90s spacing so the window spans the escalation deadline
+  // (attention at ~10s, escalation at ~370s, close on the first quiet pass).
+  for (let i = 0; i < 6; i++) {
+    await runSupervisionSweep({
+      now: () => BASE + sec(10) + sec(90 * i),
+      reconcile: async () => ({ records: readRegistry().records, liveAgents }),
+    });
+  }
+
+  // Exactly two hub sends total (attention + escalation), then silence —
+  // an unbounded per-sweep loop is the e0a35e6 regression this pins.
+  const hubAlerts = sends.filter((a) => a[1] === '@nora');
+  assert.equal(hubAlerts.length, 2);
+  assert.match(hubAlerts[0][hubAlerts[0].indexOf('--') + 1], /ATTENTION\] lost/);
+  assert.match(hubAlerts[1][hubAlerts[1].indexOf('--') + 1], /ESCALATION\] lost/);
+
+  // Incident closed into evidence with the full budget recorded.
+  const [record] = readRegistry().records;
+  assert.equal(record.supervision.incident, undefined);
+  assert.equal(record.supervision.lastIncident.alertsSent, 2);
+  assert.equal(record.supervision.lastIncident.type, 'lost');
+
+  // And it stays silent forever after (reopen guard).
+  await runSupervisionSweep({
+    now: () => BASE + sec(10) + sec(90 * 6),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
+  });
+  assert.equal(sends.filter((a) => a[1] === '@nora').length, 2);
 });

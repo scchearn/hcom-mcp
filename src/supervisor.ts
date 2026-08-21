@@ -403,6 +403,13 @@ export function evaluateWorker(params: {
   }
 
   if (!existing) {
+    // Part (b): an identical incident (same type AND generation) that was
+    // already CLOSED is spent — reopening it would re-alert every sweep
+    // forever, because the close wipes the budget the cap needs.
+    const closed = supervision.lastIncident;
+    if (closed && closed.type === type && closed.generation === generation) {
+      return outcome;
+    }
     // Open: persist-before-notify happens in the driver; this decision just
     // carries the fresh incident.
     supervision.incident = {
@@ -420,57 +427,58 @@ export function evaluateWorker(params: {
       text: incidentText({ record, policy, evidence, incidentType: type, silenceSec, level: "attention" }),
     };
     if (stalled) outcome.tier1 = true;
-    if (outcome.cleanupSubscriptions) {
-      outcome.supervision = closeIncident(outcome.supervision, nowMs);
-    }
-    return outcome;
-  }
+  } else {
+    // Same generation. A MATERIAL TYPE CHANGE (m10/A) mutates the incident
+    // in place — type + fingerprint updated, alert budget and wake history
+    // CARRIED FORWARD — so a flapping status can never mint fresh budgets
+    // or re-fire tier1 inside one generation. Escalation text reports the
+    // current type because it is composed from these fields at send time.
+    if (supervision.incident) {
+      if (supervision.incident.type !== type) {
+        supervision.incident.type = type;
+        supervision.incident.fingerprint = `${record.hcomName ?? record.id}:${type}:${generation}`;
+      }
+      if (supervision.incident.alertsSent === 0) {
+        outcome.notify = {
+          level: "attention",
+          text: incidentText({ record, policy, evidence, incidentType: type, silenceSec, level: "attention" }),
+        };
+      } else if (silenceSec >= policy.escalateAfterSec && supervision.incident.alertsSent === 1) {
+        outcome.notify = {
+          level: "escalation",
+          text: incidentText({ record, policy, evidence, incidentType: type, silenceSec, level: "escalation" }),
+        };
+      }
 
-  // Same generation. A MATERIAL TYPE CHANGE (m10/A) mutates the incident in
-  // place — type + fingerprint updated, alert budget and wake history
-  // CARRIED FORWARD — so a flapping status can never mint fresh budgets or
-  // re-fire tier1 inside one generation. Escalation text reports the
-  // current type because it is composed from these fields at send time.
-  if (supervision.incident) {
-    if (supervision.incident.type !== type) {
-      supervision.incident.type = type;
-      supervision.incident.fingerprint = `${record.hcomName ?? record.id}:${type}:${generation}`;
-    }
-    if (supervision.incident.alertsSent === 0) {
-      outcome.notify = {
-        level: "attention",
-        text: incidentText({ record, policy, evidence, incidentType: type, silenceSec, level: "attention" }),
-      };
-    } else if (silenceSec >= policy.escalateAfterSec && supervision.incident.alertsSent === 1) {
-      outcome.notify = {
-        level: "escalation",
-        text: incidentText({ record, policy, evidence, incidentType: type, silenceSec, level: "escalation" }),
-      };
-    }
-
-    // Tier2 PTY injection only for stalled_listening (m19): stalled_active
-    // means the harness IS working — injecting into it is corruption, and
-    // the unblock gate would refuse anyway.
-    if (type === "stalled_listening") {
-      if (!supervision.incident.tier1) {
-        outcome.tier1 = true;
-      } else {
-        const tier1Ms = eventTimeMs(supervision.incident.tier1.at);
-        if (
-          !supervision.incident.tier2 &&
-          tier1Ms !== null &&
-          nowMs - tier1Ms >= policy.escalateAfterSec * 1000
-        ) {
-          outcome.tier2 = true;
+      // Tier2 PTY injection only for stalled_listening (m19): stalled_active
+      // means the harness IS working — injecting into it is corruption, and
+      // the unblock gate would refuse anyway.
+      if (type === "stalled_listening") {
+        if (!supervision.incident.tier1) {
+          outcome.tier1 = true;
+        } else {
+          const tier1Ms = eventTimeMs(supervision.incident.tier1.at);
+          if (
+            !supervision.incident.tier2 &&
+            tier1Ms !== null &&
+            nowMs - tier1Ms >= policy.escalateAfterSec * 1000
+          ) {
+            outcome.tier2 = true;
+          }
         }
       }
     }
+  }
 
-    // Terminal close LAST: the recorded incident is the post-reopen one
-    // (a material type change must be what lands in lastIncident).
-    if (outcome.cleanupSubscriptions) {
-      outcome.supervision = closeIncident(outcome.supervision, nowMs);
-    }
+  // Terminal close, ONCE there is nothing left to say (part a): closing on
+  // the alerting sweep would wipe the incident and re-arm the reopen on
+  // the next pass; closing before the escalation deadline would silently
+  // drop the second alert. So: no pending notification AND the two-slot
+  // budget is spent (or there was never an incident to speak about).
+  const budgetSpent =
+    !outcome.supervision.incident || outcome.supervision.incident.alertsSent >= 2;
+  if (outcome.cleanupSubscriptions && !outcome.notify && !outcome.inform && budgetSpent) {
+    outcome.supervision = closeIncident(outcome.supervision, nowMs);
   }
 
   return outcome;
