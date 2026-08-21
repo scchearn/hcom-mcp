@@ -31,9 +31,9 @@ function makeRecord(overrides = {}) {
   };
 }
 
-function batchLaunched(by, instances) {
+function batchLaunched(by, instances, ts = iso(BASE)) {
   return JSON.stringify({
-    id: 900, ts: iso(BASE), type: 'life', instance: by,
+    id: 900, ts, type: 'life', instance: by,
     data: { action: 'batch_launched', by, instances, count_requested: instances.length, launched: instances.length },
   });
 }
@@ -168,7 +168,7 @@ test('whole tree via repetition: an adopted generation triggers on its own spawn
   await detectAndAdoptDescendants({ records, liveAgents });
 
   // Next sweep: the adopted generation's own spawn.
-  eventsFixture = batchLaunched('child1', ['grandchild']);
+  eventsFixture = batchLaunched('child1', ['grandchild'], new Date().toISOString());
   liveAgents = [...liveAgents, { name: 'grandchild', base_name: 'grandchild', status: 'listening', tool: 'opencode' }];
   ({ detectAndAdoptDescendants } = await mod());
   records = readRegistry().records;

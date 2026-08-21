@@ -4,12 +4,14 @@ import {
   defaultSupervisionPolicy,
   ensureSupervisionSubscriptions,
   listSubscriptionIds,
+  SUPERVISOR_IDENTITY,
 } from "./supervision.js";
 import {
   eventData,
   eventTimeMs,
   isAgentMessageEvent,
   isInboundDispatchEvent,
+  messageFields,
   newestEvent,
   type HcomEvent,
 } from "./events.js";
@@ -44,6 +46,12 @@ export interface WorkerEvidence {
   lastActivityKind: string | null;
   outstandingDispatch: boolean;
   wedgedQueue: boolean;
+  // Outstanding dispatch intent at observation time (supervisor-originated
+  // messages filtered out) — captured onto incidents for the tier2 gate.
+  dispatchIntent: string | null;
+  // One-line-per-event summary of the most recent activity, for incident
+  // diagnostics (#33 notification contract).
+  recentEventsSummary: string[];
 }
 
 /**
@@ -147,6 +155,8 @@ export async function fetchWorkerEvidence(
       lastActivityKind: null,
       outstandingDispatch: false,
       wedgedQueue: false,
+      dispatchIntent: null,
+      recentEventsSummary: [],
     };
   }
   const [agentEvents, inboundEvents] = await Promise.all([
@@ -154,14 +164,43 @@ export async function fetchWorkerEvidence(
     fetchInboundEvents(liveAgent.base_name, execHcomFn),
   ]);
   const activity = latestMeaningfulActivity(liveAgent.base_name, agentEvents);
-  const wedged = await detectWedgedQueue(liveAgent, agentEvents, inboundEvents, nowMs);
+  const wedged = await detectWedgedQueue(liveAgent, agentEvents, inboundEvents, nowMs, execHcomFn);
   return {
     liveAgent,
     lastActivityAtMs: activity?.atMs ?? null,
     lastActivityKind: activity?.kind ?? null,
     outstandingDispatch: hasOutstandingDispatch({ record, liveAgent, agentEvents, inboundEvents }),
     wedgedQueue: Boolean(wedged),
+    dispatchIntent: latestInboundIntent(inboundEvents, liveAgent.base_name),
+    recentEventsSummary: summarizeEvents([...agentEvents].slice(-5)),
   };
+}
+
+/** Latest inbound non-ack dispatch intent, ignoring supervisor wakes (M6). */
+function latestInboundIntent(inboundEvents: HcomEvent[], agentName: string): string | null {
+  const latest = newestEvent(
+    inboundEvents.filter((event) => {
+      if (!isInboundDispatchEvent(event, agentName)) return false;
+      const data = eventData(event);
+      if (data.from === SUPERVISOR_IDENTITY) return false;
+      if (typeof data.text === "string" && data.text.startsWith("[supervision wake]")) return false;
+      return true;
+    }),
+  );
+  return latest ? messageFields(latest).intent ?? null : null;
+}
+
+/** Compact diagnostic lines for the most recent events. */
+function summarizeEvents(events: HcomEvent[]): string[] {
+  return events.map((event) => {
+    const data = eventData(event);
+    const bits = [event.type ?? "life", String(data.action ?? data.status ?? data.new_status ?? "")];
+    if (typeof data.from === "string") bits.push(`from=${data.from}`);
+    if (typeof data.context === "string") bits.push(data.context);
+    if (typeof data.new_context === "string") bits.push(data.new_context);
+    const text = typeof data.text === "string" ? data.text.slice(0, 60) : "";
+    return `${event.ts ?? "?"} [${bits.filter(Boolean).join(" ")}]${text ? ` ${text}` : ""}`.trim();
+  });
 }
 
 // --- Sweep-side supervision resolution ---
@@ -177,9 +216,23 @@ export async function fetchWorkerEvidence(
  */
 export function resolveRecordSupervision(record: RegistryRecord): SupervisionState | null {
   if (record.released) return null;
-  if (record.state.startsWith("adopted_")) return null;
+  const adopted = record.state.startsWith("adopted_");
+  // Manual adopts carry no launchedBy and are NEVER supervised: they may be
+  // headed human-operated sessions, and waking or injecting into one is
+  // exactly what the ambiguous-silence rules forbid. Auto-adopted
+  // descendants (#37) DO carry launchedBy (the root launcher's hub) and are
+  // supervised like launches — that is what extends coverage to the tree.
+  if (adopted && !record.launchedBy) return null;
   if (record.launchMode === "headed") return null;
-  if (record.supervision) return record.supervision;
+  // Belt: an adopted record with undeterminable mode AND no owner proxy is
+  // default-deny even if some future writer forgets the proxy.
+  if (adopted && record.launchMode === undefined && !record.launchedBy) return null;
+  if (record.supervision) {
+    // An explicit block is authoritative INCLUDING its enabled flag (B2):
+    // supervise:false must never be re-enabled by the default-closed
+    // fallback.
+    return record.supervision.policy.enabled ? record.supervision : null;
+  }
   const baselineAt = record.dispatchAt ?? record.createdAt;
   if (!baselineAt) return null;
   return {
@@ -248,26 +301,35 @@ export function evaluateWorker(params: {
 }): SweepOutcome {
   const { record, evidence, nowMs } = params;
   const policy = params.supervision.policy;
+  // Activity evidence is only meaningful while the agent is live: a dead
+  // agent's event window collapsing to empty must NOT regress the
+  // generation (M5 — false RECOVERED then duplicate re-alert).
   const supervision: SupervisionState = {
     ...params.supervision,
-    ...(evidence.lastActivityAtMs !== null
+    ...(evidence.liveAgent && evidence.lastActivityAtMs !== null
       ? { lastActivityAt: new Date(evidence.lastActivityAtMs).toISOString() }
       : {}),
-    ...(evidence.lastActivityKind ? { lastActivityKind: evidence.lastActivityKind } : {}),
+    ...(evidence.liveAgent && evidence.lastActivityKind
+      ? { lastActivityKind: evidence.lastActivityKind }
+      : {}),
   };
 
   const baselineMs = Math.max(
     eventTimeMs(supervision.baselineAt) ?? 0,
-    evidence.lastActivityAtMs ?? 0,
+    evidence.liveAgent ? evidence.lastActivityAtMs ?? 0 : 0,
   );
   const generation = new Date(baselineMs).toISOString();
   const silenceSec = (nowMs - baselineMs) / 1000;
   const existing = supervision.incident;
 
-  // Resolution first: a newer generation than the open incident's means
-  // meaningful activity resumed — resolve, inform the hub once (recovered),
-  // and rebuild silence from the new activity.
-  if (existing && generation !== existing.generation) {
+  // Resolution first: a STRICTLY NEWER generation while the agent is live
+  // means meaningful activity resumed — resolve, inform the hub once
+  // (recovered), and rebuild silence from the new activity.
+  if (
+    existing &&
+    evidence.liveAgent &&
+    baselineMs > (eventTimeMs(existing.generation) ?? 0)
+  ) {
     delete supervision.incident;
     return {
       supervision,
@@ -306,8 +368,9 @@ export function evaluateWorker(params: {
   ) {
     if (!supervision.cleanStopInformedAt) {
       supervision.cleanStopInformedAt = new Date(nowMs).toISOString();
+      const closed = closeIncident(supervision);
       return {
-        supervision,
+        supervision: closed,
         inform: {
           kind: "completed",
           text: `[COMPLETED] ${record.hcomName ?? record.id}: stopped cleanly with no outstanding report.`,
@@ -316,7 +379,10 @@ export function evaluateWorker(params: {
       };
     }
     // Already informed for this episode; still confirm cleanup is done.
-    return { supervision, cleanupSubscriptions: supervision.subscriptions.length > 0 };
+    return {
+      supervision: closeIncident(supervision),
+      cleanupSubscriptions: supervision.subscriptions.length > 0,
+    };
   }
   if (evidence.liveAgent && supervision.cleanStopInformedAt) {
     delete supervision.cleanStopInformedAt;
@@ -329,12 +395,17 @@ export function evaluateWorker(params: {
   const stalled = type === "stalled_active" || type === "stalled_listening";
   const outcome: SweepOutcome = { supervision };
 
-  // Terminal states: nothing to watch anymore — drop the push lane.
-  if (!evidence.liveAgent) outcome.cleanupSubscriptions = true;
+  // Terminal states: nothing to watch anymore — drop the push lane and
+  // close the incident (retained as lastIncident lifecycle evidence).
+  if (!evidence.liveAgent) {
+    outcome.cleanupSubscriptions = true;
+    outcome.supervision = closeIncident(outcome.supervision);
+  }
 
-  if (!existing) {
-    // Open: persist-before-notify happens in the driver; this decision just
-    // carries the fresh incident.
+  if (!existing || existing.type !== type) {
+    // Open — or MATERIAL CHANGE (m10): a different incident type on the same
+    // generation reopens with a fresh fingerprint and budget, because the
+    // escalated state differs from what the spent budget described.
     supervision.incident = {
       type,
       openedAt: new Date(nowMs).toISOString(),
@@ -343,6 +414,7 @@ export function evaluateWorker(params: {
       fingerprint: `${record.hcomName ?? record.id}:${type}:${generation}`,
       alertsSent: 0,
       deliveryFailed: false,
+      dispatchIntent: evidence.dispatchIntent,
     };
     outcome.notify = {
       level: "attention",
@@ -369,7 +441,10 @@ export function evaluateWorker(params: {
       };
     }
 
-    if (stalled) {
+    // Tier2 PTY injection only for stalled_listening (m19): stalled_active
+    // means the harness IS working — injecting into it is corruption, and
+    // the unblock gate would refuse anyway.
+    if (type === "stalled_listening") {
       if (!supervision.incident.tier1) {
         outcome.tier1 = true;
       } else {
@@ -445,131 +520,156 @@ export async function runSupervisionSweep(deps: {
   // starts at adoption).
   await detectAndAdoptDescendants({ records, liveAgents, execHcomFn });
 
-  const updates: { id: string; supervision: SupervisionState | undefined }[] = [];
+  const updates: { id: string; supervision: SupervisionState | undefined; clearSubscriptions?: boolean }[] = [];
 
-  for (const record of records) {
-    const hadIncident = Boolean(record.supervision?.incident);
-    let supervision = resolveRecordSupervision(record);
-    if (!supervision) continue;
-    summary.evaluated += 1;
+  // Per-record handler. Failure-isolated (M4): one throw (e.g. a transient
+  // 'hcom list' failure inside a tier2 recheck) is logged and the record's
+  // latest state is still persisted — alerts already delivered are never
+  // lost to a later throw, so budgets and attempt records stay truthful.
+  const evaluateOne = async (record: RegistryRecord): Promise<void> => {
+    try {
+      const hadIncident = Boolean(record.supervision?.incident);
+      let supervision = resolveRecordSupervision(record);
+      if (!supervision) return;
+      summary.evaluated += 1;
 
-    // Rehydration: reinstall only kinds whose stored id hcom no longer has.
-    const terminalState =
-      record.state === 'managed_stopped' ||
-      record.state === 'adopted_stopped' ||
-      record.state === 'managed_lost' ||
-      record.state === 'adopted_lost';
-    if (
-      !terminalState &&
-      subIds &&
-      supervision.subscriptions.length > 0 &&
-      supervision.hub &&
-      supervision.subscriptions.some((sub) => !subIds.has(sub.subId))
-    ) {
-      const alive = supervision.subscriptions.filter((sub) => subIds.has(sub.subId));
-      const res = await ensureSupervisionSubscriptions(
-        supervision.hub,
-        record.hcomName ?? "",
-        alive,
-        execHcomFn,
-        async (subId: string) => Boolean(subIds?.has(subId)),
-      );
-      supervision = {
-        ...supervision,
-        subscriptions: res.subscriptions,
-        ...(res.errors.length > 0 ? { installErrors: res.errors } : {}),
-      };
-    }
-
-    const evidence = await fetchWorkerEvidence(record, liveAgents, nowMs, execHcomFn);
-    const outcome = evaluateWorker({ record, supervision, evidence, nowMs });
-    let next = outcome.supervision;
-
-    if (!hadIncident && next.incident) summary.incidentsOpened += 1;
-    if (hadIncident && !next.incident) summary.incidentsResolved += 1;
-
-    if (outcome.inform) {
-      const delivered = await deliverNotification(
-        next.hub,
-        next.thread,
-        outcome.inform.text,
-        execHcomFn,
-        "inform",
-      );
-      if (!delivered) summary.alertsFailed += 1;
-    }
-
-    if (outcome.notify) {
-      const delivered = await deliverNotification(
-        next.hub,
-        next.thread,
-        outcome.notify.text,
-        execHcomFn,
-      );
-      if (delivered) {
-        summary.alertsSent += 1;
-        next = {
-          ...next,
-          incident: next.incident
-            ? {
-                ...next.incident,
-                alertsSent:
-                  outcome.notify.level === "attention"
-                    ? Math.max(next.incident.alertsSent, 1)
-                    : Math.max(next.incident.alertsSent, 2),
-                lastAlertAt: new Date(nowMs).toISOString(),
-                deliveryFailed: false,
-              }
-            : next.incident,
-        };
-      } else {
-        summary.alertsFailed += 1;
-        next = {
-          ...next,
-          incident: next.incident
-            ? { ...next.incident, deliveryFailed: true }
-            : next.incident,
+      // Rehydration: reinstall only kinds whose stored id hcom no longer has.
+      const terminalState =
+        record.state === "managed_stopped" ||
+        record.state === "adopted_stopped" ||
+        record.state === "managed_lost" ||
+        record.state === "adopted_lost";
+      if (
+        !terminalState &&
+        subIds &&
+        supervision.subscriptions.length > 0 &&
+        supervision.hub &&
+        supervision.subscriptions.some((sub) => !subIds.has(sub.subId))
+      ) {
+        const alive = supervision.subscriptions.filter((sub) => subIds.has(sub.subId));
+        const res = await ensureSupervisionSubscriptions(
+          supervision.hub,
+          record.hcomName ?? "",
+          alive,
+          execHcomFn,
+          async (subId: string) => Boolean(subIds?.has(subId)),
+        );
+        supervision = {
+          ...supervision,
+          subscriptions: res.subscriptions,
+          ...(res.errors.length > 0 ? { installErrors: res.errors } : {}),
         };
       }
-    }
 
-    if (outcome.tier1 && next.incident) {
-      summary.tier1Attempts += 1;
-      const result = await sendTier1Wake(record.hcomName ?? "", execHcomFn);
-      next = {
-        ...next,
-        incident: { ...next.incident!, tier1: { at: new Date(nowMs).toISOString(), outcome: result } },
-      };
-    }
+      const evidence = await fetchWorkerEvidence(record, liveAgents, nowMs, execHcomFn);
+      const outcome = evaluateWorker({ record, supervision, evidence, nowMs });
+      let next = outcome.supervision;
 
-    if (outcome.tier2 && next.incident) {
-      summary.tier2Attempts += 1;
-      const result = await runTier2Wake(record, execHcomFn);
-      next = {
-        ...next,
-        incident: { ...next.incident!, tier2: { at: new Date(nowMs).toISOString(), outcome: result } },
-      };
-    }
+      if (!hadIncident && next.incident) summary.incidentsOpened += 1;
+      if (hadIncident && !next.incident && !next.lastIncident?.closedAt) summary.incidentsResolved += 1;
 
-    // #33 cleanup: confirmed terminal workers lose their push lane — the
-    // subscriptions can never fire again and must not accumulate.
-    if (outcome.cleanupSubscriptions && next.subscriptions.length > 0) {
-      await Promise.allSettled(
-        next.subscriptions.map((sub) => execHcomFn(["events", "unsub", sub.subId])),
+      // M3: persist the incident BEFORE any notification goes out, so a
+      // throw during delivery can never lose an alerted incident.
+      if (outcome.notify || outcome.tier1 || outcome.tier2) {
+        applySupervisionUpdates([{ id: record.id, supervision: next }]);
+      }
+
+      if (outcome.inform) {
+        const delivered = await deliverNotification(
+          next.hub,
+          outcome.inform.text,
+          execHcomFn,
+          "inform",
+        );
+        if (!delivered) summary.alertsFailed += 1;
+      }
+
+      if (outcome.notify) {
+        // M8: enrich the alert with recent events, terminal tail, and the
+        // rescue-attempted line before it leaves the building.
+        const enriched = await enrichIncidentText(
+          outcome.notify.text,
+          next.incident,
+          record.hcomName ?? "",
+          evidence.recentEventsSummary,
+          execHcomFn,
+        );
+        const delivered = await deliverNotification(next.hub, enriched, execHcomFn);
+        if (delivered) {
+          summary.alertsSent += 1;
+          next = {
+            ...next,
+            incident: next.incident
+              ? {
+                  ...next.incident,
+                  alertsSent:
+                    outcome.notify.level === "attention"
+                      ? Math.max(next.incident.alertsSent, 1)
+                      : Math.max(next.incident.alertsSent, 2),
+                  lastAlertAt: new Date(nowMs).toISOString(),
+                  deliveryFailed: false,
+                }
+              : next.incident,
+          };
+        } else {
+          summary.alertsFailed += 1;
+          next = {
+            ...next,
+            incident: next.incident
+              ? { ...next.incident, deliveryFailed: true }
+              : next.incident,
+          };
+        }
+      }
+
+      if (outcome.tier1 && next.incident) {
+        summary.tier1Attempts += 1;
+        const result = await sendTier1Wake(record.hcomName ?? "", execHcomFn);
+        next = {
+          ...next,
+          incident: { ...next.incident!, tier1: { at: new Date(nowMs).toISOString(), outcome: result } },
+        };
+      }
+
+      if (outcome.tier2 && next.incident) {
+        summary.tier2Attempts += 1;
+        const result = await runTier2Wake(record, execHcomFn);
+        next = {
+          ...next,
+          incident: { ...next.incident!, tier2: { at: new Date(nowMs).toISOString(), outcome: result } },
+        };
+      }
+
+      // #33 cleanup: confirmed terminal workers lose their push lane — the
+      // subscriptions can never fire again and must not accumulate.
+      let cleared = false;
+      if (outcome.cleanupSubscriptions && next.subscriptions.length > 0) {
+        await Promise.allSettled(
+          next.subscriptions.map((sub) => execHcomFn(["events", "unsub", sub.subId])),
+        );
+        next = { ...next, subscriptions: [] };
+        cleared = true;
+      }
+
+      updates.push({ id: record.id, supervision: next, clearSubscriptions: cleared });
+    } catch (err: any) {
+      console.error(
+        `[supervision] record ${record.id} (${record.hcomName ?? "?"}) failed:`,
+        err?.message ?? err,
       );
-      next = { ...next, subscriptions: [] };
     }
+  };
 
-    updates.push({ id: record.id, supervision: next });
-  }
+  // m14: bounded concurrency — serial awaits over a large live fleet would
+  // outrun the sweep interval; unbounded Promise.all would saturate the CLI.
+  await mapWithConcurrency(records, 4, evaluateOne);
 
   // Orphaned-subscription reconciliation, safe subset (#33 cleanup):
   // RELEASED records keep no push lane — their subscriptions are removed
-  // and the supervision block dropped. Records already deleted (e.g. by
+  // and the supervision block closed. Records already deleted (e.g. by
   // prune) are NOT scanned globally: mass-unsubscribing hcom entities
   // without a record boundary is a destructive, owner-consent operation.
-  const released = getReleasedSupervisionRecords();
-  for (const record of released) {
+  for (const record of getReleasedSupervisionRecords()) {
     if (record.supervision && record.supervision.subscriptions.length > 0) {
       await Promise.allSettled(
         record.supervision.subscriptions.map((sub) => execHcomFn(["events", "unsub", sub.subId])),
@@ -577,7 +677,10 @@ export async function runSupervisionSweep(deps: {
     }
     updates.push({
       id: record.id,
-      supervision: record.supervision ? withoutIncident({ ...record.supervision, subscriptions: [] }) : record.supervision,
+      supervision: record.supervision
+        ? withoutIncident({ ...record.supervision, subscriptions: [] })
+        : record.supervision,
+      clearSubscriptions: true,
     });
   }
 
@@ -601,11 +704,13 @@ async function runTier2Wake(record: RegistryRecord, execHcomFn: ExecHcomFn): Pro
   const { runUnblock } = await import("./tools/unblock.js");
   const rescue = await runUnblock(name, {
     workspace: record.workspace,
+    sender_name: SUPERVISOR_IDENTITY,
     dryRun: false,
     text: TIER1_WAKE_PROMPT,
     waitSec: 15,
     execHcomFn,
     supervisionRescue: true,
+    wakeIntentOverride: nextIncidentDispatchIntent(record),
   });
   return rescue.ok
     ? `tier2 wake injected (${rescue.state ?? "unknown"} after recheck)`
@@ -619,23 +724,85 @@ function withoutIncident(supervision: SupervisionState): SupervisionState {
   return next;
 }
 
+/** Close an open incident: retained as lastIncident evidence (m11). */
+function closeIncident(supervision: SupervisionState): SupervisionState {
+  if (!supervision.incident) return supervision;
+  const { incident, ...rest } = supervision;
+  return { ...rest, lastIncident: { ...incident, closedAt: new Date().toISOString() } };
+}
+
+/** Run async work over items with bounded concurrency, preserving order of results. */
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let index = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const current = items[index++];
+      await worker(current);
+    }
+  });
+  await Promise.all(runners);
+}
+
+/**
+ * M8: append recent-event summary, terminal tail, and rescue-attempted
+ * lines to the base incident text at SEND time (the tail costs one
+ * subprocess per alerting record, not per evaluated record).
+ */
+async function enrichIncidentText(
+  baseText: string,
+  incident: SupervisionState["incident"],
+  name: string,
+  recentEventsSummary: string[],
+  execHcomFn: ExecHcomFn,
+): Promise<string> {
+  const lines: string[] = [];
+  if (recentEventsSummary.length > 0) {
+    lines.push(`recent events:\n  ${recentEventsSummary.join("\n  ")}`);
+  }
+  try {
+    const { fetchScreenTail } = await import("./tools/unblock.js");
+    lines.push(`terminal tail:\n  ${(await fetchScreenTail(name, execHcomFn)).split("\n").join("\n  ")}`);
+  } catch {
+    lines.push("terminal tail: unavailable");
+  }
+  const tier1 = incident?.tier1 ? `tier1 (${incident.tier1.outcome})` : null;
+  const tier2 = incident?.tier2 ? `tier2 (${incident.tier2.outcome})` : null;
+  lines.push(`rescue attempted: ${[tier1, tier2].filter(Boolean).join(", ") || "none"}`);
+  return `${baseText}\n${lines.join("\n")}`;
+}
+
 async function deliverNotification(
   hub: string,
-  thread: string | undefined,
   text: string,
   execHcomFn: ExecHcomFn,
   intent: "request" | "inform" = "request",
 ): Promise<boolean> {
   if (!hub) return false; // missing hub: retained, surfaced as deliveryFailed
-  const args = thread
-    ? ["send", `@${hub}`, "--thread", thread, "--intent", intent, "--", text]
-    : ["send", `@${hub}`, "--intent", intent, "--", text];
+  // m13: workflow-thread routing dropped — nothing populates a thread at
+  // launch time today; re-add routing when topology launches seed threads.
+  const args = [
+    "send", `@${hub}`, "--from", SUPERVISOR_IDENTITY,
+    "--intent", intent, "--", text,
+  ];
   const result = await execHcomFn(args);
   return result.exitCode === 0;
 }
 
+/**
+ * The outstanding dispatch intent captured when the record's incident was
+ * opened (M6): tier2's allowlist gate checks this instead of the newest
+ * inbound message, which after tier1 is the supervisor's own wake.
+ */
+function nextIncidentDispatchIntent(record: RegistryRecord): string | null {
+  return record.supervision?.incident?.dispatchIntent ?? null;
+}
+
 async function sendTier1Wake(name: string, execHcomFn: ExecHcomFn): Promise<string> {
-  const result = await execHcomFn(["send", `@${name}`, "--intent", "request", "--", TIER1_WAKE_PROMPT]);
+  const result = await execHcomFn(["send", `@${name}`, "--from", SUPERVISOR_IDENTITY, "--intent", "request", "--", TIER1_WAKE_PROMPT]);
   return result.exitCode === 0 ? "tier1 wake sent" : `tier1 wake failed: ${result.stderr || result.stdout}`;
 }
 
@@ -661,7 +828,11 @@ export function startSupervisor(
     if (sweepRunning) return;
     sweepRunning = true;
     try {
+      const sweepStarted = Date.now();
       const summary = await runSupervisionSweep(deps);
+      if (Date.now() - sweepStarted > SWEEP_INTERVAL_MS) {
+        console.error("[supervision] sweep exceeded its interval; ticks were skipped by the overlap guard");
+      }
       // Empirical wake-ladder telemetry (#33 owner decision): tier success
       // rates are reported per milestone from these counters.
       if (summary.incidentsOpened || summary.incidentsResolved || summary.tier1Attempts || summary.tier2Attempts || summary.alertsFailed) {

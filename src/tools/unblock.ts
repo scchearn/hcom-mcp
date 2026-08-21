@@ -11,6 +11,7 @@ import { getOwnedRecordsByWorkspace, updateRecordState } from "../registry.js";
 import { validateStopKillTarget } from "./lifecycle.js";
 import { detectWedgedQueue, fetchAgentEvents, fetchInboundEvents } from "./watch.js";
 import { isInboundDispatchEvent, messageFields, newestEvent, type HcomEvent } from "../events.js";
+import { SUPERVISOR_IDENTITY } from "../supervision.js";
 import type { RegistryRecord } from "../types.js";
 import {
   E_AGENT_NOT_LIVE,
@@ -33,10 +34,20 @@ function isStalledListening(live: { status: string; status_age_seconds?: number 
   return live.status === "listening" && (live.status_age_seconds ?? 0) >= 600;
 }
 
-/** Intent of the latest inbound non-ack dispatch, for the wake-intent gate. */
+/**
+ * Intent of the latest inbound non-ack dispatch, for the wake-intent gate.
+ * Supervisor-originated messages (tier1 wakes) are filtered out — the gate
+ * must never pass on evidence the supervisor manufactured.
+ */
 function latestDispatchIntent(inboundEvents: HcomEvent[], agentName: string): string | null {
   const latest = newestEvent(
-    inboundEvents.filter((event) => isInboundDispatchEvent(event, agentName)),
+    inboundEvents.filter((event) => {
+      if (!isInboundDispatchEvent(event, agentName)) return false;
+      const { from, text } = messageFields(event);
+      if (from === SUPERVISOR_IDENTITY) return false;
+      if (typeof text === "string" && text.startsWith("[supervision wake]")) return false;
+      return true;
+    }),
   );
   return latest ? messageFields(latest).intent ?? null : null;
 }
@@ -166,6 +177,10 @@ export async function runUnblock(
     waitSec?: number;
     execHcomFn?: typeof execHcom;
     supervisionRescue?: boolean;
+    // M6: explicit outstanding-dispatch intent captured at incident-open
+    // time. When provided it REPLACES the newest-inbound derivation, so the
+    // supervisor's own tier1 wake can never satisfy the allowlist.
+    wakeIntentOverride?: string | null;
   } = {},
 ): Promise<{
   ok: boolean;
@@ -220,7 +235,10 @@ export async function runUnblock(
       fetchInboundEvents(live.base_name, execHcomFn),
     ]);
     wedgedEvidence = await detectWedgedQueue(live, agentEvents, inboundEvents);
-    supervisionIntent = wedgedEvidence?.dispatchIntent ?? latestDispatchIntent(inboundEvents, live.base_name);
+    supervisionIntent =
+      options.wakeIntentOverride !== undefined
+        ? options.wakeIntentOverride
+        : wedgedEvidence?.dispatchIntent ?? latestDispatchIntent(inboundEvents, live.base_name);
     if (!wedgedEvidence && !isStalledListening(live)) {
       return {
         ok: false,

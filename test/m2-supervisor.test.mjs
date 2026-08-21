@@ -255,8 +255,20 @@ test('records without a supervision block default to supervised at resolved defa
   const orphan = resolveRecordSupervision(makeRecord({ supervision: undefined, launchedBy: undefined }));
   assert.equal(orphan.hub, '');
 
-  // Adopted / headed / released records are not supervised.
-  assert.equal(resolveRecordSupervision(makeRecord({ state: 'adopted_active' })), null);
+  // Manual adopts (no launchedBy) are NEVER supervised — they may be
+  // headed human sessions. Auto-adopted descendants (#37, launchedBy set)
+  // ARE supervised like launches.
+  assert.equal(resolveRecordSupervision(makeRecord({ state: 'adopted_active', launchedBy: undefined })), null);
+  const autoAdopted = resolveRecordSupervision(
+    makeRecord({ id: 'aa', state: 'adopted_active', preset: 'adopted', launchedBy: 'nora' }),
+  );
+  assert.equal(autoAdopted.hub, 'nora');
+  assert.equal(autoAdopted.baselineAt, iso(BASE));
+  // Belt: undeterminable mode AND no owner proxy stays default-deny.
+  assert.equal(
+    resolveRecordSupervision(makeRecord({ id: 'ab', state: 'adopted_active', preset: 'adopted', launchedBy: undefined })),
+    null,
+  );
   assert.equal(resolveRecordSupervision(makeRecord({ launchMode: 'headed' })), null);
   assert.equal(resolveRecordSupervision(makeRecord({ released: true })), null);
 });
@@ -327,7 +339,7 @@ test('sweep supervises a legacy record, persists the incident before notifying, 
   let now = BASE + sec(200);
   const summary = await runSupervisionSweep({
     now: () => now,
-    reconcile: async () => ({ records: [seeded], liveAgents }),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
   });
 
   assert.equal(summary.evaluated, 1);
@@ -349,7 +361,10 @@ test('sweep supervises a legacy record, persists the incident before notifying, 
   // Second sweep past the escalation deadline: exactly one escalation, no
   // new incident, no duplicate tier1.
   now = BASE + sec(200) + sec(400);
-  const summary2 = await runSupervisionSweep({ now: () => now });
+  const summary2 = await runSupervisionSweep({
+    now: () => now,
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
+  });
   assert.equal(summary2.incidentsOpened, 0);
   assert.equal(summary2.alertsSent, 1);
   assert.equal(summary2.tier1Attempts, 0);
@@ -382,7 +397,7 @@ test('sweep resolves an incident when meaningful activity appears, and retains u
   const { runSupervisionSweep } = await loadSupervisor();
   const summary = await runSupervisionSweep({
     now: () => BASE + sec(600),
-    reconcile: async () => ({ records: [seeded], liveAgents }),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
   });
 
   assert.equal(summary.incidentsResolved, 1);
@@ -402,7 +417,7 @@ test('a missing hub retains the incident with deliveryFailed surfaced', async (t
   const { runSupervisionSweep } = await loadSupervisor();
   const summary = await runSupervisionSweep({
     now: () => BASE + sec(200),
-    reconcile: async () => ({ records: [seeded], liveAgents }),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
   });
 
   assert.equal(summary.alertsFailed, 1);
@@ -606,7 +621,7 @@ test('rehydration reinstalls only subscription kinds hcom dropped, without dupli
   const { runSupervisionSweep } = await loadSupervisor();
   await runSupervisionSweep({
     now: () => BASE + sec(10),
-    reconcile: async () => ({ records: [seeded], liveAgents }),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
   });
 
   const [record] = readRegistry().records;
@@ -641,7 +656,7 @@ test('a restart does not duplicate alerts: persisted budget survives a fresh mod
   const { runSupervisionSweep } = await loadSupervisor();
   const summary = await runSupervisionSweep({
     now: () => BASE + sec(300), // past attention, before escalation
-    reconcile: async () => ({ records: [seeded], liveAgents }),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
   });
 
   assert.equal(summary.alertsSent, 0);

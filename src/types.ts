@@ -134,6 +134,11 @@ export const SupervisionIncidentSchema = z.object({
   // Dedup fingerprint (#33): worker + incident type + activity generation.
   // One incident per fingerprint ever alerts more than the two-level budget.
   fingerprint: z.string().optional(),
+  // Outstanding dispatch intent captured at OPEN time (M6): tier2's
+  // wake-intent gate checks THIS, never the newest inbound message — the
+  // supervisor's own tier1 wake is a request and would otherwise satisfy
+  // the allowlist it manufactured.
+  dispatchIntent: z.string().nullish(),
   alertsSent: z.number().int().min(0).default(0),
   lastAlertAt: z.string().optional(),
   // True when the last hub notification could not be delivered (missing
@@ -145,6 +150,9 @@ export const SupervisionIncidentSchema = z.object({
   // escalation window. One attempt per tier per incident generation.
   tier1: RescueAttemptSchema.optional(),
   tier2: RescueAttemptSchema.optional(),
+  // Set when the incident is CLOSED (terminal cleanup / resolution):
+  // retained as lifecycle evidence under supervision.lastIncident.
+  closedAt: z.string().optional(),
 });
 export type SupervisionIncident = z.infer<typeof SupervisionIncidentSchema>;
 
@@ -154,8 +162,6 @@ export type SupervisionIncident = z.infer<typeof SupervisionIncidentSchema>;
 export const SupervisionStateSchema = z.object({
   // Hub to notify (the launcher recorded at launch time).
   hub: z.string(),
-  // Workflow thread when one is recorded; otherwise the hub is DM'd.
-  thread: z.string().optional(),
   // Effective policy after global -> preset -> per-launch resolution.
   policy: SupervisionPolicySchema,
   // Installed subscription ids, keyed by kind, for dedupe and cleanup.
@@ -178,6 +184,8 @@ export const SupervisionStateSchema = z.object({
   // cleanly" inform for the CURRENT stopped episode, so it is sent once
   // per stop; cleared whenever the agent is live again.
   cleanStopInformedAt: z.string().optional(),
+  // Most recently CLOSED incident, kept as lifecycle evidence (m11).
+  lastIncident: SupervisionIncidentSchema.optional(),
 });
 export type SupervisionState = z.infer<typeof SupervisionStateSchema>;
 

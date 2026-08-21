@@ -321,6 +321,7 @@ export function adoptRecord(params: {
   hcomName: string;
   sessionId?: string;
   launchedBy?: string;
+  launchMode?: LaunchMode;
 }): RegistryRecord {
   const registry = loadRegistry();
   const now = new Date().toISOString();
@@ -332,8 +333,11 @@ export function adoptRecord(params: {
     sessionId: params.sessionId,
     preset: "adopted",
     state: "adopted_active",
-    // Adopted records have no launch metadata
+    // Adopted records have no launch metadata beyond ownership provenance:
+    // launchedBy routes #33 supervision (auto-adopt only), launchMode keeps
+    // the headed/human-session guard honest.
     launchedBy: params.launchedBy,
+    launchMode: params.launchMode,
     topology: undefined,
     topologyRole: undefined,
     createdAt: now,
@@ -616,7 +620,13 @@ export function resolveRootLauncher(
  * block wholesale — the sweep computes complete next-states.
  */
 export function applySupervisionUpdates(
-  updates: { id: string; supervision: RegistryRecord["supervision"] }[],
+  updates: {
+    id: string;
+    supervision: RegistryRecord["supervision"];
+    // Terminal cleanup explicitly CLEARS the push lane; without this flag
+    // the union below would resurrect the kinds it just removed.
+    clearSubscriptions?: boolean;
+  }[],
 ): void {
   if (updates.length === 0) return;
   const registry = loadRegistry();
@@ -626,9 +636,21 @@ export function applySupervisionUpdates(
     if (!record) continue;
     if (update.supervision === undefined) {
       delete record.supervision;
-    } else {
-      record.supervision = update.supervision;
+      continue;
     }
+    // m17: the sweep's snapshot can be seconds old. A concurrent launch may
+    // have installed subscriptions the snapshot never saw — union them by
+    // kind (update wins per kind) instead of clobbering. Every other field
+    // takes the update wholesale: incidents must be clearable.
+    const existingSubs = record.supervision?.subscriptions ?? [];
+    const updateSubs = update.supervision.subscriptions;
+    const mergedSubs = update.clearSubscriptions
+      ? updateSubs
+      : [
+          ...updateSubs,
+          ...existingSubs.filter((sub) => !updateSubs.some((u) => u.kind === sub.kind)),
+        ];
+    record.supervision = { ...update.supervision, subscriptions: mergedSubs };
   }
   saveRegistry(registry);
 }
@@ -702,7 +724,11 @@ export async function pruneRecords(
     allWorkspaces?: boolean;
     expired?: boolean;
   } = {},
-): Promise<{ removed: RegistryRecord[]; wouldRemove: RegistryRecord[] }> {
+): Promise<{
+  removed: RegistryRecord[];
+  wouldRemove: RegistryRecord[];
+  subIdsToUnsubscribe?: string[];
+}> {
   const {
     // lostOlderThanDays is the canonical name; olderThanDays is kept as a
     // deprecated alias for one release (mapped, not dropped).
@@ -770,9 +796,15 @@ export async function pruneRecords(
 
   if (confirm) {
     const removeIds = new Set(toRemove.map((r) => r.id));
+    // m15: hand back the removed records' subscription ids so the caller
+    // (which has exec access) can unsubscribe them — hard-deleting the
+    // record alone would orphan the hcom entities forever.
+    const subIds = toRemove.flatMap((r) =>
+      (r.supervision?.subscriptions ?? []).map((sub) => sub.subId),
+    );
     registry.records = registry.records.filter((r) => !removeIds.has(r.id));
     saveRegistry(registry);
-    return { removed: toRemove, wouldRemove: [] };
+    return { removed: toRemove, wouldRemove: [], subIdsToUnsubscribe: subIds };
   }
 
   return { removed: [], wouldRemove: toRemove };

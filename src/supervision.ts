@@ -1,4 +1,13 @@
 import { execHcom } from "./hcom.js";
+
+/**
+ * System identity for all supervision-originated hcom sends (alerts, wake
+ * ladder, adoption notices). The MCP service runs WITHOUT an hcom identity
+ * (systemd env: PATH + HCOM_MCP_PORT only), so bare 'hcom send' fails with
+ * "hcom identity not found"; --from makes the sends deliverable and lets
+ * downstream code recognize supervisor-originated messages.
+ */
+export const SUPERVISOR_IDENTITY = "hcom-mcp-supervisor";
 import type { ExecResult } from "./hcom.js";
 import {
   SupervisionPolicySchema,

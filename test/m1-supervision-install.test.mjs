@@ -162,9 +162,14 @@ test('supervise:false opts out entirely: no subscription calls, no supervision s
 
   assert.equal(calls.filter((a) => a[0] === 'events' && a[1] === 'sub').length, 0);
   const payload = JSON.parse(response.content[0].text);
+  // No push lane was installed, so no supervision block on the RESULT.
   assert.equal(payload.supervision, undefined);
+  // B2: the DISABLED policy is persisted on the record — an absent block
+  // would let the sweep's default-closed fallback re-enable supervision
+  // and invert the opt-out.
   const [record] = readRegistry().records;
-  assert.equal(record.supervision, undefined);
+  assert.equal(record.supervision.policy.enabled, false);
+  assert.deepEqual(record.supervision.subscriptions, []);
 });
 
 test('headed launches are not supervised', async (t) => {

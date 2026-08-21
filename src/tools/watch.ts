@@ -81,8 +81,8 @@ function isAgentConsumptionEvent(event: HcomEvent, agentName: string, dispatchMs
   );
 }
 
-async function fetchTermTail(name: string): Promise<string> {
-  const result = await execHcom(["term", name, "--json"]);
+async function fetchTermTail(name: string, execHcomFn: typeof execHcom = execHcom): Promise<string> {
+  const result = await execHcomFn(["term", name, "--json"]);
   if (result.exitCode !== 0) return `(hcom term failed: ${result.stderr || result.stdout})`;
   const parsed = parseHcomJson<{ lines?: unknown }>(result.stdout);
   if (parsed && Array.isArray(parsed.lines)) {
@@ -96,6 +96,7 @@ export async function detectWedgedQueue(
   agentEvents: HcomEvent[],
   inboundEvents: HcomEvent[],
   nowMs: number = Date.now(),
+  execHcomFn: typeof execHcom = execHcom,
 ): Promise<WedgedQueueEvidence | undefined> {
   if (live.tool !== "opencode" || live.status !== "listening") return undefined;
 
@@ -118,7 +119,7 @@ export async function detectWedgedQueue(
     evidenceTimestamp: eventTimestamp(latestDispatch.event) ?? new Date(latestDispatch.timestamp).toISOString(),
     ageSeconds,
     dispatchIntent: messageFields(latestDispatch.event).intent ?? null,
-    termTail: await fetchTermTail(live.base_name),
+    termTail: await fetchTermTail(live.base_name, execHcomFn),
   };
 }
 

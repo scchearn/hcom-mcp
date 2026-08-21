@@ -1,6 +1,7 @@
 import { z } from "zod";
 import * as registry from "../registry.js";
 import { runTeardown } from "./lifecycle.js";
+import { execHcom } from "../hcom.js";
 import { E_INTERNAL, E_PRUNE_KILL_FAILED, internalError, toolError } from "../errors.js";
 
 const { pruneRecords, removeRecords } = registry;
@@ -127,7 +128,20 @@ export function registerPruneTool(server: any) {
           return summarize(result.wouldRemove, false, verbose);
         }
 
-        return summarize(result.removed, true, verbose);
+        // m15: removed records' supervision subscriptions become hcom
+        // orphans unless unsubscribed — the ids are known, so this is
+        // record-scoped cleanup, not the deferred global scan.
+        let unsubscribed: string[] = [];
+        if (result.subIdsToUnsubscribe?.length) {
+          const results = await Promise.allSettled(
+            result.subIdsToUnsubscribe.map((subId) => execHcom(["events", "unsub", subId])),
+          );
+          unsubscribed = results
+            .map((r, i) => (r.status === "fulfilled" ? result.subIdsToUnsubscribe![i] : null))
+            .filter((id): id is string => id !== null);
+        }
+
+        return summarize(result.removed, true, verbose, { unsubscribed });
       } catch (err: any) {
         return internalError(err);
       }

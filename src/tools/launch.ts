@@ -701,17 +701,17 @@ export async function launchAgent(
         requireReport,
         dispatchAt,
         expiresAt,
-        ...(install
+        ...(supervision && launchedBy && preset.headless !== false
           ? {
               supervision: {
-                hub: launchedBy!,
-                policy: supervision!.policy,
-                subscriptions: install.subscriptions,
-                // Persisted degradation: a short subscriptions array alone
-                // reads as "not installed yet"; installErrors tells the M2
-                // sweep this worker's push lane is down and the watchdog
-                // lane must cover it.
-                ...(install.errors ? { installErrors: install.errors } : {}),
+                hub: launchedBy,
+                policy: supervision.policy,
+                // B2: the block is persisted EVEN when policy.enabled is
+                // false or installs failed — an absent block would flip the
+                // sweep's default-closed fallback back ON and invert the
+                // opt-out. Disabled is a state, not an absence.
+                subscriptions: install?.subscriptions ?? [],
+                ...(install?.errors ? { installErrors: install.errors } : {}),
                 baselineAt: dispatchAt,
               },
             }

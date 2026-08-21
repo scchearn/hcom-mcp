@@ -1,6 +1,7 @@
 import { execHcom, inferHarnessFromTool } from "./hcom.js";
 import type { ExecHcomFn } from "./supervision.js";
-import { eventData, parseHcomEvents, type HcomEvent } from "./events.js";
+import { SUPERVISOR_IDENTITY } from "./supervision.js";
+import { eventData, eventTimeMs, parseHcomEvents, type HcomEvent } from "./events.js";
 import { adoptRecord, resolveRootLauncher } from "./registry.js";
 import type { HcomAgent, RegistryRecord } from "./types.js";
 
@@ -56,16 +57,23 @@ export async function detectAndAdoptDescendants(deps: {
 
   // Managed ancestors: any non-released owned record with an hcom name —
   // launched AND adopted generations both trigger the rule (whole tree).
+  // M7a: the ancestor must be LIVE right now and the spawn must postdate
+  // its creation — CVCV names get reused, and a batch_launched by a name
+  // that only matches a long-dead record says nothing about lineage.
+  const liveBaseNames = new Set(deps.liveAgents.map((a) => a.base_name));
   const managedByName = new Map<string, RegistryRecord>();
   for (const record of deps.records) {
     if (record.released || !record.hcomName) continue;
+    if (!liveBaseNames.has(record.hcomName)) continue;
     managedByName.set(record.hcomName, record);
   }
   if (managedByName.size === 0) return { adopted, skipped };
 
-  // Owned names, for dedup regardless of which workspace holds the record.
-  const ownedNames = new Set(
-    deps.records.filter((r) => !r.released && r.hcomName).map((r) => r.hcomName as string),
+  // M7b: dedup against EVERY record ever carrying the name, released
+  // included — a deliberately released agent must not be re-adopted every
+  // sweep while its batch_launched event is still in the window.
+  const knownNames = new Set(
+    deps.records.filter((r) => r.hcomName).map((r) => r.hcomName as string),
   );
 
   let events: HcomEvent[] = [];
@@ -77,8 +85,12 @@ export async function detectAndAdoptDescendants(deps: {
   }
 
   for (const launch of extractBatchLaunches(events)) {
+    const launchMs = eventTimeMs(events.find((e) => eventData(e).by === launch.by) ?? {});
     const ancestor = managedByName.get(launch.by);
-    if (!ancestor) continue; // spawner is not ours: leave untracked
+    if (!ancestor) continue; // spawner is not ours (or not live): leave untracked
+    // M7a recency: a spawn predating the ancestor record's creation is a
+    // name-reuse coincidence, not lineage.
+    if (launchMs !== null && launchMs < (eventTimeMs(ancestor.createdAt) ?? 0)) continue;
 
     const hub = resolveRootLauncher(ancestor, deps.records) ?? ancestor.launchedBy ?? null;
 
@@ -91,7 +103,7 @@ export async function detectAndAdoptDescendants(deps: {
         skipped.push(`${instance}: not live in hcom`);
         continue;
       }
-      if (ownedNames.has(live.base_name)) continue; // already managed
+      if (knownNames.has(live.base_name)) continue; // already managed or previously released
 
       const harness = inferHarnessFromTool(live.tool);
       if (!harness) {
@@ -105,8 +117,9 @@ export async function detectAndAdoptDescendants(deps: {
         hcomName: live.base_name,
         sessionId: live.session_id,
         launchedBy: hub ?? undefined,
+        launchMode: live.headless === false ? "headed" : "headless",
       });
-      ownedNames.add(live.base_name);
+      knownNames.add(live.base_name);
       adopted.push({ name: live.base_name, ancestor: launch.by, hub });
 
       // Adoption notice without a caller identity: sent externally, best-
@@ -116,7 +129,7 @@ export async function detectAndAdoptDescendants(deps: {
         `hub: ${hub ?? "(unattributed)"}  your name: ${live.base_name}  harness: ${harness}  workspace: ${ancestor.workspace}`,
         `Stop/kill commands from ${hub ?? "the hub"} are now authoritative for your session.`,
       ].join("\n");
-      await execHcomFn(["send", `@${live.base_name}`, "--intent", "inform", "--", text]);
+      await execHcomFn(["send", `@${live.base_name}`, "--from", SUPERVISOR_IDENTITY, "--intent", "inform", "--", text]);
     }
   }
 
