@@ -358,7 +358,11 @@ export function findRecordByWorkspaceAndName(
 }
 
 /**
- * Match a record to a live hcom agent by its stored base name.
+ * Match a record to a live hcom agent by its stored base/display name.
+ * Purely name-based: directory and session data are NOT filters here (a
+ * record's workspace is often a service home or a parent of the agent's
+ * real directory, so filtering would false-demote live agents). Name
+ * collisions between records are arbitrated in reconcileManagedRecords.
  */
 export function matchLiveAgent(
   record: Pick<RegistryRecord, "hcomName">,
@@ -392,12 +396,46 @@ export function isRecordExpired(record: RegistryRecord, now: number = Date.now()
  * "adopted_expired" for adopted records) so prune's expired mode can find
  * them; the state is a flag, not a lifecycle claim — the agent may still be
  * alive and is killed by prune expired=true.
+ *
+ * Contested-name arbitration: CVCV names are reused, so several unreleased
+ * records can share one hcomName while only one live agent exists. When a
+ * name is contested, directory equality is the tie-breaker — the record
+ * whose workspace IS the live agent's directory keeps the match and its
+ * rivals are treated as unmatched this pass. If no record can prove
+ * ownership by directory, everyone keeps the plain name match: ambiguity
+ * must never mass-demote. Single-record names are untouched, so a record
+ * whose workspace is a service home or a parent of the agent's real
+ * directory still matches normally.
  */
 export function reconcileManagedRecords(
   records: RegistryRecord[],
   hcomAgents: HcomAgent[],
   stoppedNames: string[] = [],
 ): RegistryRecord[] {
+  const nameCounts = new Map<string, number>();
+  for (const record of records) {
+    if (!record.released && record.hcomName) {
+      nameCounts.set(record.hcomName, (nameCounts.get(record.hcomName) ?? 0) + 1);
+    }
+  }
+  const contested = new Set(
+    [...nameCounts.entries()].filter(([, count]) => count > 1).map(([name]) => name),
+  );
+
+  const matchLive = (record: RegistryRecord): HcomAgent | null => {
+    const live = matchLiveAgent(record, hcomAgents);
+    if (!live || !record.hcomName || !contested.has(record.hcomName)) return live;
+    const provenOwner = records.some(
+      (r) =>
+        !r.released &&
+        r.hcomName === record.hcomName &&
+        r.workspace !== undefined &&
+        r.workspace === live.directory,
+    );
+    if (!provenOwner) return live;
+    return record.workspace === live.directory ? live : null;
+  };
+
   return records.map((record) => {
     if (record.released || !record.hcomName) {
       return record;
@@ -417,13 +455,13 @@ export function reconcileManagedRecords(
     // A flagged-expired record whose expiresAt was removed or extended reverts
     // to the live-vs-lost truth instead of staying *_expired forever.
     if (record.state === "managed_expired" || record.state === "adopted_expired") {
-      const liveAgent = matchLiveAgent(record, hcomAgents);
+      const liveAgent = matchLive(record);
       const activeState = record.state === "managed_expired" ? "managed_active" : "adopted_active";
       const lostState = record.state === "managed_expired" ? "managed_lost" : "adopted_lost";
       return { ...record, state: (liveAgent ? activeState : lostState) as OwnershipState };
     }
 
-    const liveAgent = matchLiveAgent(record, hcomAgents);
+    const liveAgent = matchLive(record);
 
     // Reverse reconcile stopped→active for both managed and adopted
     if (
@@ -475,58 +513,102 @@ export function reconcileManagedRecords(
 }
 
 /**
- * Reconcile a workspace's records against live hcom state and persist any
- * state transitions. Returns the reconciled records.
+ * A state change produced by reconciling: record `id` moved from `from` to
+ * `to`. Keyed by id (not array index) so a future filter/sort inside
+ * reconcileManagedRecords can never silently misattribute a transition.
  */
-export async function reconcileWorkspaceRecords(workspace: string): Promise<RegistryRecord[]> {
-  const records = getOwnedRecordsByWorkspace(workspace);
-  const [hcomAgents, stoppedNames] = await Promise.all([
-    listHcomAgents(),
-    listStoppedAgentNames(),
-  ]);
-  const reconciled = reconcileManagedRecords(records, hcomAgents, stoppedNames);
-  persistReconciledState(records, reconciled);
-  return reconciled;
+export interface ReconcileTransition {
+  id: string;
+  from: OwnershipState;
+  to: OwnershipState;
+}
+
+/**
+ * Diff two record sets by id. Both sides must come from the same reconcile
+ * pass (before = input records, after = their reconciled counterparts).
+ */
+export function diffReconciledState(
+  before: RegistryRecord[],
+  after: RegistryRecord[],
+): ReconcileTransition[] {
+  const beforeById = new Map(before.map((record) => [record.id, record]));
+  const transitions: ReconcileTransition[] = [];
+  for (const record of after) {
+    const prev = beforeById.get(record.id);
+    if (prev && prev.state !== record.state) {
+      transitions.push({ id: record.id, from: prev.state, to: record.state });
+    }
+  }
+  return transitions;
+}
+
+/**
+ * Persist reconcile transitions in ONE registry load + ONE atomic write.
+ * Per-transition load/save would be O(transitions × records) on a global
+ * pass over a large registry and would widen the accepted lost-update race
+ * window with every write; a mid-loop load failure could also leave the
+ * pass half-persisted.
+ *
+ * Transitions are bookkeeping, not user activity: lastSeenAt is not
+ * touched, or every demotion resets the age clock that prune's age rules
+ * depend on.
+ */
+export function persistReconciledTransitions(transitions: ReconcileTransition[]): void {
+  if (transitions.length === 0) return;
+  const registry = loadRegistry();
+  const byId = new Map(registry.records.map((record) => [record.id, record]));
+  for (const transition of transitions) {
+    const record = byId.get(transition.id);
+    if (record) record.state = transition.to;
+  }
+  saveRegistry(registry);
+}
+
+/**
+ * Thin wrapper for existing before/after callers (list_managed, prune):
+ * diff by id and batch-persist the result.
+ */
+export function persistReconciledState(before: RegistryRecord[], after: RegistryRecord[]) {
+  persistReconciledTransitions(diffReconciledState(before, after));
 }
 
 /**
  * Reconcile EVERY non-released owned record against live hcom state,
- * regardless of workspace, and persist any state transitions.
+ * regardless of workspace, and persist any state transitions in one batched
+ * write.
  *
- * reconcileWorkspaceRecords only heals the workspace a caller happens to
+ * Workspace-scoped reconcile only healed the workspace a caller happens to
  * target, so records stranded in deleted worktree workspaces stayed
  * managed_active forever while hcom reported only a handful of live agents.
- * This global pass fetches live state once and settles all owned records;
- * transitions are persisted without touching lastSeenAt, so prune's age
- * rules stay valid.
+ * This global pass fetches live state once and settles all owned records.
+ *
+ * ponytail: owned records with no hcomName (legacy launches that died
+ * before hcom assigned a name — none are written today) pass through
+ * untouched and are never demoted; they stay invisible to prune's lost-age
+ * rules. Count them honestly rather than pretending they are healed.
+ *
+ * `prefetch` lets a caller that already holds a live snapshot (status, the
+ * M2 sweep) reuse it instead of paying for a second `hcom list`; the
+ * returned liveAgents/stoppedNames let the same caller skip a third fetch.
  */
-export async function reconcileGlobalRecords(): Promise<{
+export async function reconcileGlobalRecords(prefetch?: {
+  hcomAgents: HcomAgent[];
+  stoppedNames: string[];
+}): Promise<{
   records: RegistryRecord[];
-  transitions: number;
+  transitions: ReconcileTransition[];
+  liveAgents: HcomAgent[];
+  stoppedNames: string[];
 }> {
   const registry = loadRegistry();
   const owned = registry.records.filter((r) => !r.released);
-  const [hcomAgents, stoppedNames] = await Promise.all([
-    listHcomAgents(),
-    listStoppedAgentNames(),
-  ]);
+  const [hcomAgents, stoppedNames] = prefetch
+    ? [prefetch.hcomAgents, prefetch.stoppedNames]
+    : await Promise.all([listHcomAgents(), listStoppedAgentNames()]);
   const reconciled = reconcileManagedRecords(owned, hcomAgents, stoppedNames);
-  const transitions = reconciled.filter(
-    (record, index) => record.state !== owned[index].state,
-  ).length;
-  persistReconciledState(owned, reconciled);
-  return { records: reconciled, transitions };
-}
-
-export function persistReconciledState(before: RegistryRecord[], after: RegistryRecord[]) {
-  for (const [index, record] of after.entries()) {
-    if (record.state !== before[index]?.state) {
-      // Reconcile transitions are bookkeeping, not user activity: do not
-      // touch lastSeenAt, or every demotion resets the age clock that
-      // prune's age rules depend on.
-      updateRecordState(record.id, record.state, false);
-    }
-  }
+  const transitions = diffReconciledState(owned, reconciled);
+  persistReconciledTransitions(transitions);
+  return { records: reconciled, transitions, liveAgents: hcomAgents, stoppedNames };
 }
 
 /**
@@ -562,8 +644,11 @@ export async function pruneRecords(
   // Reconcile first: demote never-live records to lost (and flag expired
   // ephemeral records) so the age rules below can reach them. Without this,
   // phantom managed_active records are invisible to prune forever.
-  // Only the records in scope are reconciled and persisted: a caller pruning
-  // workspace A must not silently mutate workspace B record states.
+  // Deliberate policy, not a global invariant: prune only reconciles the
+  // records in scope so a caller pruning workspace A never silently mutates
+  // workspace B record states. Cross-workspace healing lives in
+  // reconcileGlobalRecords (wired into status), which reconciles every
+  // owned record regardless of workspace.
   const [hcomAgents, stoppedNames] = await Promise.all([
     listHcomAgents(),
     listStoppedAgentNames(),

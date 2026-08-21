@@ -178,7 +178,7 @@ export function registerListTopologiesTool(server: any) {
 export function registerStatusTool(server: any) {
   server.tool(
     "status",
-    "Quick health and orientation summary for hcom-mcp, including hcom CLI install health — surfaced here because hook/install breakage stays invisible until launches die. Read-only; no sender identity required. Related: list_managed, list_all, list_presets.",
+    "Quick health and orientation summary for hcom-mcp, including hcom CLI install health — surfaced here because hook/install breakage stays invisible until launches die. Runs one global registry reconcile (persists state transitions across every workspace) and reports its evidence; no sender identity required. Related: list_managed, list_all, list_presets.",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
     },
@@ -188,13 +188,18 @@ export function registerStatusTool(server: any) {
       try {
         const config = loadMergedConfig(cwd);
         const paths = getConfigPaths(cwd);
-        const liveAgents = await listHcomAgents();
         const workspaceRecords = getRecordsByWorkspace(cwd);
         // Global reconcile heals every workspace in one pass — records
         // stranded in dead worktree workspaces used to stay managed_active
         // forever because no tool call ever targeted those workspaces. The
-        // workspace view is filtered out of the same reconciled set.
-        const { records: reconciledAll, transitions } = await reconcileGlobalRecords();
+        // workspace view is filtered out of the same reconciled set, and the
+        // live snapshot comes from the SAME fetch so liveAgentCount can never
+        // disagree with the stateBreakdown in this payload.
+        const {
+          records: reconciledAll,
+          transitions,
+          liveAgents,
+        } = await reconcileGlobalRecords();
         const reconciled = reconciledAll.filter((record) => record.workspace === cwd);
 
         // Full state breakdown across every ownership state, including the
@@ -219,9 +224,10 @@ export function registerStatusTool(server: any) {
           liveAgentCount: liveAgents.length,
           managedRecordCount: reconciled.length,
           stateBreakdown,
-          // Global reconcile evidence: how many owned records exist across
-          // ALL workspaces and how many states the pass just corrected.
-          globalRecordCount: reconciledAll.length,
+          // Global reconcile evidence: how many non-released owned records
+          // exist across ALL workspaces (released excluded, adopted
+          // included) and which states the pass just corrected.
+          globalOwnedRecordCount: reconciledAll.length,
           globalReconcileTransitions: transitions,
           managedLostCount: reconciled.filter((record) => record.state === "managed_lost").length,
           managedReleasedCount: workspaceRecords.filter((record) => record.released).length,

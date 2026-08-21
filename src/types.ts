@@ -268,5 +268,16 @@ export const HcomAgentSchema = z.object({
   directory: z.string().optional(),
   session_id: z.string().optional(),
   headless: z.boolean().optional(),
+  // Evidence fields hcom reports beyond the core shape (#33 supervision):
+  // incident diagnostics need the transcript/log locations and launch
+  // context without re-parsing raw CLI output later.
+  agent_id: z.string().optional(),
+  background_log_file: z.string().optional(),
+  transcript_path: z.string().optional(),
+  created_at: z.string().optional(),
+  parent_name: z.string().optional(),
+  process_bound: z.boolean().optional(),
+  hooks_bound: z.boolean().optional(),
+  launch_context: z.record(z.string(), z.unknown()).optional(),
 });
 export type HcomAgent = z.infer<typeof HcomAgentSchema>;

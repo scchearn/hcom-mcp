@@ -71,8 +71,7 @@ function registryMock(overrides = {}) {
     matchLiveAgent: () => null,
     persistReconciledState: () => {},
     reconcileManagedRecords: (records) => records,
-    reconcileGlobalRecords: async () => ({ records: [], transitions: 0 }),
-    reconcileWorkspaceRecords: async () => [],
+    reconcileGlobalRecords: async () => ({ records: [], transitions: [], liveAgents: [], stoppedNames: [] }),
     ...overrides,
   };
 }
