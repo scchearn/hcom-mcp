@@ -9,6 +9,8 @@ import { parseLifeEvents, parseTermJson } from "../gate.js";
 import { loadMergedConfig } from "../config.js";
 import { getOwnedRecordsByWorkspace, updateRecordState } from "../registry.js";
 import { validateStopKillTarget } from "./lifecycle.js";
+import { detectWedgedQueue, fetchAgentEvents, fetchInboundEvents } from "./watch.js";
+import { isInboundDispatchEvent, messageFields, newestEvent, type HcomEvent } from "../events.js";
 import type { RegistryRecord } from "../types.js";
 import {
   E_AGENT_NOT_LIVE,
@@ -20,6 +22,24 @@ import {
 } from "../errors.js";
 
 const SCREEN_TAIL_LINES = 30;
+
+/**
+ * Stalled-listening evidence without the full wedged_queue threshold: a
+ * listening agent whose status has been quiet far longer than one
+ * supervision escalation window. Used by the tier2 gate as the fallback
+ * signal when OpenCode-specific wedge evidence is absent.
+ */
+function isStalledListening(live: { status: string; status_age_seconds?: number }): boolean {
+  return live.status === "listening" && (live.status_age_seconds ?? 0) >= 600;
+}
+
+/** Intent of the latest inbound non-ack dispatch, for the wake-intent gate. */
+function latestDispatchIntent(inboundEvents: HcomEvent[], agentName: string): string | null {
+  const latest = newestEvent(
+    inboundEvents.filter((event) => isInboundDispatchEvent(event, agentName)),
+  );
+  return latest ? messageFields(latest).intent ?? null : null;
+}
 
 /**
  * Match the launch_blocked detail text against the config rescue allowlist.
@@ -124,9 +144,17 @@ export async function injectRescue(
 }
 
 /**
- * The unblock flow shared by the unblock tool and spawn_and_verify rescue:
- * validate ownership + blocked state, dry-run report, optional guarded
- * injection, bounded re-check, registry transition.
+ * The unblock flow shared by the unblock tool, spawn_and_verify rescue, and
+ * the M2 supervision wake ladder (tier2): validate ownership + state,
+ * dry-run report, optional guarded injection, bounded re-check, registry
+ * transition.
+ *
+ * supervisionRescue extends the gate to LISTENING agents carrying
+ * wedged_queue/stalled_listening evidence (owner decision, issue #33
+ * comment): the detector flags those but the classic gate only served
+ * blocked agents. The dispatch-intent allowlist still applies — an
+ * ambiguous silence is never auto-injected — and the caller owns
+ * one-attempt-per-incident-generation; this function stays stateless.
  */
 export async function runUnblock(
   name: string,
@@ -137,6 +165,7 @@ export async function runUnblock(
     text?: string;
     waitSec?: number;
     execHcomFn?: typeof execHcom;
+    supervisionRescue?: boolean;
   } = {},
 ): Promise<{
   ok: boolean;
@@ -157,7 +186,8 @@ export async function runUnblock(
 
   const { owned, canonicalName } = validation;
 
-  // Refuse unless the agent is live AND currently blocked. Injecting Enter
+  // Refuse unless the agent is live AND (blocked OR a supervision rescue
+  // against a listening agent with wedge/stall evidence). Injecting Enter
   // into a working agent is silent corruption.
   const agents = await listHcomAgents();
   const live = findLiveAgentByIdentifier(canonicalName, agents);
@@ -168,15 +198,39 @@ export async function runUnblock(
       text: toolError(E_AGENT_NOT_LIVE, `Agent "${name}" is not live in hcom.`).content[0].text,
     };
   }
+
+  let wedgedEvidence: Awaited<ReturnType<typeof detectWedgedQueue>> | undefined;
+  let supervisionIntent: string | undefined | null;
   if (live.status !== "blocked") {
-    return {
-      ok: false,
-      isError: true,
-      text: toolError(
-        E_AGENT_NOT_BLOCKED,
-        `Agent "${name}" is not blocked (status: ${live.status}). Refusing to inject input into a working agent.`,
-      ).content[0].text,
-    };
+    if (!options.supervisionRescue || live.status !== "listening") {
+      return {
+        ok: false,
+        isError: true,
+        text: toolError(
+          E_AGENT_NOT_BLOCKED,
+          `Agent "${name}" is not blocked (status: ${live.status}). Refusing to inject input into a working agent.`,
+        ).content[0].text,
+      };
+    }
+    // Supervision rescue: require concrete wedge/stall evidence before any
+    // injection into a listening agent, and capture the outstanding
+    // dispatch intent for the allowlist gate below.
+    const [agentEvents, inboundEvents] = await Promise.all([
+      fetchAgentEvents(live.base_name, execHcomFn),
+      fetchInboundEvents(live.base_name, execHcomFn),
+    ]);
+    wedgedEvidence = await detectWedgedQueue(live, agentEvents, inboundEvents);
+    supervisionIntent = wedgedEvidence?.dispatchIntent ?? latestDispatchIntent(inboundEvents, live.base_name);
+    if (!wedgedEvidence && !isStalledListening(live)) {
+      return {
+        ok: false,
+        isError: true,
+        text: toolError(
+          E_AGENT_NOT_BLOCKED,
+          `Agent "${name}" is listening without wedged_queue or stalled evidence; refusing to inject.`,
+        ).content[0].text,
+      };
+    }
   }
 
   const blockedDetail = await fetchBlockedDetail(canonicalName, execHcomFn);
@@ -188,6 +242,13 @@ export async function runUnblock(
     status: live.status,
     blockedDetail: blockedDetail?.detail ?? null,
     blockedReason: blockedDetail?.reason ?? null,
+    ...(supervisionIntent !== undefined || wedgedEvidence
+      ? {
+          supervisionRescue: true,
+          dispatchIntent: supervisionIntent ?? null,
+          wedgedQueue: Boolean(wedgedEvidence),
+        }
+      : {}),
     screenTail,
   };
 
@@ -211,15 +272,32 @@ export async function runUnblock(
       }, null, 2),
     };
   }
-  if (!isRescuableDetail(blockedDetail?.detail, allowlist.patterns)) {
-    return {
-      ok: false,
-      isError: true,
-      text: JSON.stringify({
-        ...report,
-        error: `[${E_INJECTION_REFUSED}] Blocked detail does not match any rescue allowlist pattern; refusing to inject. Add a pattern to rescueAllowlist in config if this dialog is known-safe.`,
-      }, null, 2),
-    };
+  if (live.status === "blocked") {
+    if (!isRescuableDetail(blockedDetail?.detail, allowlist.patterns)) {
+      return {
+        ok: false,
+        isError: true,
+        text: JSON.stringify({
+          ...report,
+          error: `[${E_INJECTION_REFUSED}] Blocked detail does not match any rescue allowlist pattern; refusing to inject. Add a pattern to rescueAllowlist in config if this dialog is known-safe.`,
+        }, null, 2),
+      };
+    }
+  } else {
+    // Supervision rescue against a listening agent: the outstanding
+    // dispatch's intent must be on the wake-intent allowlist. Ambiguous
+    // silence with no dispatch at all is never auto-injected.
+    const wakeIntents = allowlist.wakeIntents ?? ["request"];
+    if (!supervisionIntent || !wakeIntents.includes(supervisionIntent as "request" | "inform" | "ack")) {
+      return {
+        ok: false,
+        isError: true,
+        text: JSON.stringify({
+          ...report,
+          error: `[${E_INJECTION_REFUSED}] Outstanding dispatch intent "${supervisionIntent ?? "none"}" is not on the wake-intent allowlist (${wakeIntents.join(", ")}); refusing to inject.`,
+        }, null, 2),
+      };
+    }
   }
 
   const injection = await injectRescue(canonicalName, options.text, execHcomFn);

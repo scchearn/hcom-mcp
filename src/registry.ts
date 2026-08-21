@@ -606,6 +606,31 @@ export function resolveRootLauncher(
 }
 
 /**
+ * Persist supervision-state updates for many records in ONE registry load +
+ * ONE atomic write (same batching rationale as
+ * persistReconciledTransitions: a sweep over a large fleet must not pay a
+ * full load/save per record). Each update REPLACES the record's supervision
+ * block wholesale — the sweep computes complete next-states.
+ */
+export function applySupervisionUpdates(
+  updates: { id: string; supervision: RegistryRecord["supervision"] }[],
+): void {
+  if (updates.length === 0) return;
+  const registry = loadRegistry();
+  const byId = new Map(registry.records.map((record) => [record.id, record]));
+  for (const update of updates) {
+    const record = byId.get(update.id);
+    if (!record) continue;
+    if (update.supervision === undefined) {
+      delete record.supervision;
+    } else {
+      record.supervision = update.supervision;
+    }
+  }
+  saveRegistry(registry);
+}
+
+/**
  * Reconcile EVERY non-released owned record against live hcom state,
  * regardless of workspace, and persist any state transitions in one batched
  * write.

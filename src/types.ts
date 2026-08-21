@@ -106,6 +106,45 @@ export const SupervisionSubscriptionSchema = z.object({
 });
 export type SupervisionSubscription = z.infer<typeof SupervisionSubscriptionSchema>;
 
+// --- #33 M2: watchdog incidents ---
+
+export const SupervisionIncidentTypeEnum = z.enum([
+  "blocked",
+  "stalled_active",
+  "stalled_listening",
+  "stopped_unreported",
+  "lost",
+]);
+export type SupervisionIncidentType = z.infer<typeof SupervisionIncidentTypeEnum>;
+
+export const RescueAttemptSchema = z.object({
+  at: z.string(),
+  outcome: z.string(),
+});
+export type RescueAttempt = z.infer<typeof RescueAttemptSchema>;
+
+export const SupervisionIncidentSchema = z.object({
+  type: SupervisionIncidentTypeEnum,
+  openedAt: z.string(),
+  // Activity generation at open: the fingerprint of the latest meaningful
+  // activity this incident was opened against. A NEWER generation means
+  // work resumed and resolves the incident; the same generation keeps the
+  // alert budget capped (one attention alert, one escalation).
+  generation: z.string(),
+  alertsSent: z.number().int().min(0).default(0),
+  lastAlertAt: z.string().optional(),
+  // True when the last hub notification could not be delivered (missing
+  // hub or hcom send failure). The incident is retained either way and
+  // surfaced through status / list_managed / watch_agents.
+  deliveryFailed: z.boolean().default(false),
+  // Wake-ladder attempts (owner decision, issue #33 comment): tier1 =
+  // in-band ack-requested send at open; tier2 = extended unblock after one
+  // escalation window. One attempt per tier per incident generation.
+  tier1: RescueAttemptSchema.optional(),
+  tier2: RescueAttemptSchema.optional(),
+});
+export type SupervisionIncident = z.infer<typeof SupervisionIncidentSchema>;
+
 // Per-record supervision state. Optional on every record: legacy records
 // rehydrate without it, and released/adopted records never carry it unless
 // supervision was attached when they were created.
@@ -126,6 +165,12 @@ export const SupervisionStateSchema = z.object({
   installErrors: z.array(z.string()).optional(),
   // Silence baseline: the dispatch timestamp supervision measures from.
   baselineAt: z.string(),
+  // Latest meaningful activity evidence (harness-adapter output, M2).
+  lastActivityAt: z.string().optional(),
+  lastActivityKind: z.string().optional(),
+  // Open incident, if any. Absence = healthy (or resolved by newer
+  // activity). Persisted BEFORE hub notification per issue #33.
+  incident: SupervisionIncidentSchema.optional(),
 });
 export type SupervisionState = z.infer<typeof SupervisionStateSchema>;
 
@@ -231,6 +276,10 @@ export const RescueAllowlistSchema = z.object({
     "select a model",
     "choose a provider",
   ]),
+  // #33 wake ladder (tier2): the outstanding dispatch intents a supervision
+  // rescue may auto-inject against. `request` only by default — ambiguous
+  // silence around broadcasts/informs is never auto-woken via PTY.
+  wakeIntents: z.array(z.enum(["request", "inform", "ack"])).default(["request"]),
 });
 export type RescueAllowlist = z.infer<typeof RescueAllowlistSchema>;
 

@@ -89,6 +89,8 @@ function mockLifecycleDeps(t, { records, callerName, execHcom }) {
       canonicalizeAgentName: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id)?.base_name ??
         (id.startsWith('@') ? id.slice(1) : id),
+      // unblock.ts now links against watch.js, which needs these.
+      parseHcomJson: JSON.parse,
       execHcom: execHcom,
     },
   });
@@ -96,6 +98,8 @@ function mockLifecycleDeps(t, { records, callerName, execHcom }) {
     namedExports: {
       getOwnedRecordsByWorkspace: () => records,
       updateRecordState: () => null,
+      // watch.js (pulled in by unblock.ts) links against this.
+      resolveRootLauncher: (record) => record.launchedBy,
     },
   });
 }

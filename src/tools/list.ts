@@ -49,6 +49,7 @@ export function enrichManagedRecord(
     launchedBy: record.launchedBy ?? null,
     rootLaunchedBy,
     foreign,
+    incident: record.supervision?.incident ?? null,
     managementType,
     liveFound: Boolean(liveAgent),
     liveName: liveAgent?.name ?? null,
@@ -259,6 +260,18 @@ export function registerStatusTool(server: any) {
             acc[key] = (acc[key] ?? 0) + 1;
             return acc;
           }, {}),
+          // #33: unresolved supervision incidents, including undelivered
+          // ones (deliveryFailed) — a missing hub never loses an incident.
+          activeIncidents: reconciled
+            .filter((record) => record.supervision?.incident)
+            .map((record) => ({
+              id: record.id,
+              hcomName: record.hcomName,
+              type: record.supervision!.incident!.type,
+              openedAt: record.supervision!.incident!.openedAt,
+              alertsSent: record.supervision!.incident!.alertsSent,
+              deliveryFailed: record.supervision!.incident!.deliveryFailed,
+            })),
           reportEvidence: reconciled
             .filter((record) => record.requireReport)
             .map((record) => ({

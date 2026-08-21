@@ -9,7 +9,7 @@ import {
 } from "../hcom.js";
 import { getOwnedRecordsByWorkspace, resolveRootLauncher } from "../registry.js";
 import { installSubscription } from "../supervision.js";
-import type { HcomAgent, RegistryRecord } from "../types.js";
+import type { HcomAgent, RegistryRecord, SupervisionIncident } from "../types.js";
 import { E_INTERNAL, E_NO_SENDER, internalError, toolError } from "../errors.js";
 import {
   eventData,
@@ -47,18 +47,18 @@ interface ReportEvidence {
  * Returns [] for non-JSON output so a CLI format drift degrades to "no
  * events" instead of a hard error.
  */
-async function fetchAgentEvents(name: string): Promise<HcomEvent[]> {
+export async function fetchAgentEvents(name: string, execHcomFn: typeof execHcom = execHcom): Promise<HcomEvent[]> {
   const [life, message] = await Promise.all([
-    execHcom(["events", "--last", "200", "--type", "life", "--agent", name]),
-    execHcom(["events", "--last", "200", "--type", "message", "--agent", name]),
+    execHcomFn(["events", "--last", "200", "--type", "life", "--agent", name]),
+    execHcomFn(["events", "--last", "200", "--type", "message", "--agent", name]),
   ]);
   return [life, message]
     .filter((result) => result.exitCode === 0)
     .flatMap((result) => parseHcomEvents(result.stdout));
 }
 
-async function fetchInboundEvents(name: string): Promise<HcomEvent[]> {
-  const result = await execHcom(["events", "--last", "200", "--type", "message", "--mention", name]);
+export async function fetchInboundEvents(name: string, execHcomFn: typeof execHcom = execHcom): Promise<HcomEvent[]> {
+  const result = await execHcomFn(["events", "--last", "200", "--type", "message", "--mention", name]);
   if (result.exitCode !== 0) return [];
   return parseHcomEvents(result.stdout);
 }
@@ -91,10 +91,11 @@ async function fetchTermTail(name: string): Promise<string> {
   return result.stdout.slice(-4000);
 }
 
-async function detectWedgedQueue(
+export async function detectWedgedQueue(
   live: HcomAgent,
   agentEvents: HcomEvent[],
   inboundEvents: HcomEvent[],
+  nowMs: number = Date.now(),
 ): Promise<WedgedQueueEvidence | undefined> {
   if (live.tool !== "opencode" || live.status !== "listening") return undefined;
 
@@ -110,7 +111,7 @@ async function detectWedgedQueue(
     return undefined;
   }
 
-  const ageSeconds = Math.floor((Date.now() - latestDispatch.timestamp) / 1000);
+  const ageSeconds = Math.floor((nowMs - latestDispatch.timestamp) / 1000);
   if (ageSeconds < WEDGED_QUEUE_THRESHOLD_SEC) return undefined;
 
   return {
@@ -182,6 +183,8 @@ export async function buildWatchLine(
   lastMessage: string | null;
   report: ReportEvidence;
   wedgedQueue?: WedgedQueueEvidence;
+  // Open supervision incident (#33), if any.
+  incident: SupervisionIncident | null;
   // Provenance (#33 follow-up): whose lane this agent belongs to. foreign
   // is true when the launcher is not the calling hub — surfaced as a field,
   // never silently mixed.
@@ -205,6 +208,7 @@ export async function buildWatchLine(
       lastLifeEvent: null,
       lastMessage: null,
       report: buildReportEvidence(record, [], []),
+      incident: record.supervision?.incident ?? null,
       launchedBy: record.launchedBy ?? null,
       rootLaunchedBy,
       foreign,
@@ -260,6 +264,7 @@ export async function buildWatchLine(
     lastLifeEvent: lastLife,
     lastMessage: lastMessageText,
     report,
+    incident: record.supervision?.incident ?? null,
     launchedBy: record.launchedBy ?? null,
     rootLaunchedBy,
     foreign,
@@ -380,6 +385,7 @@ export function registerWatchAgentsTool(server: any) {
           wedged_queue: lines.filter((l) => l.flags.includes("wedged_queue")).length,
           lost: lines.filter((l) => l.flags.includes("lost")).length,
           unreported: lines.filter((l) => l.flags.includes("unreported")).length,
+          incidents: lines.filter((l) => l.incident).length,
           healthy: lines.filter((l) => l.flags.length === 0).length,
         };
 
