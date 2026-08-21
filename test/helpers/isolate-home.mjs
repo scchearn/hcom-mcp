@@ -6,7 +6,7 @@
 // which are resolved at import time — land under a throwaway root. No test
 // can reach the real ~/.hcom/mcp state through homedir(); if the redirect
 // ever fails to take effect, the worker dies loudly instead of leaking.
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
@@ -21,6 +21,18 @@ if (homedir() !== tempHome) {
     `[E_TEST_ISOLATION] HOME redirect failed: homedir() resolved to ${homedir()}, expected ${tempHome}`,
   );
 }
+
+// ponytail: this preload covers `npm test` only — a bare
+// `node --test test/foo.test.mjs` bypasses it and the guard file cannot fire.
+// Upgrade path: resolve REGISTRY_DIR lazily in src/registry.ts so isolation no
+// longer depends on winning the race against import order.
+process.on("exit", () => {
+  try {
+    rmSync(tempHome, { recursive: true, force: true });
+  } catch {
+    // never throw from an exit handler; a leftover /tmp dir is harmless
+  }
+});
 
 globalThis.__HCOM_TEST_ISOLATION__ = {
   realHome,

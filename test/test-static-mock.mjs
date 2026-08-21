@@ -21,8 +21,11 @@ function createFakeServer() {
 
 (runUnsafeDemo ? test : test.skip)('static import + mock.module', async (t) => {
   let capturedArgs;
-  // Hermetic registry: this demo launches successfully, which would otherwise
-  // append records to the real ~/.hcom/mcp/registry.json (#36 Bug 1).
+  // t.mock.module cannot reach the STATICALLY imported module graph — that is
+  // this demo's entire point — so neither this registry stub nor the hcom mock
+  // below applies to the static launch call further down. What keeps the real
+  // ~/.hcom/mcp/registry.json safe here is test/helpers/isolate-home.mjs (HOME
+  // redirect via --import), not mocking. The stub only covers the dynamic half.
   t.mock.module('../dist/registry.js', {
     namedExports: {
       addRecord: (record) => ({ ...record, id: 'rec-demo' }),
