@@ -22,6 +22,16 @@ function createFakeServer() {
 
 (runUnsafeDemo ? test : test.skip)('static import + mock.module + dynamic import with cache-bust', async (t) => {
   let capturedArgs;
+  // Hermetic registry: this demo launches successfully, which would otherwise
+  // append records to the real ~/.hcom/mcp/registry.json (#36 Bug 1).
+  t.mock.module('../dist/registry.js', {
+    namedExports: {
+      addRecord: (record) => ({ ...record, id: 'rec-demo' }),
+      removeRecords: () => {},
+      updateRecordState: () => null,
+      updateRecordVerify: () => null,
+    },
+  });
   t.mock.module('../dist/hcom.js', {
     namedExports: {
       execHcom: async (args) => {
