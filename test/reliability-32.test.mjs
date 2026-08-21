@@ -56,6 +56,7 @@ function mockWatchDeps(t, { agentEvents, inboundEvents, unreadCount = 0, execHco
   t.mock.module('../dist/registry.js', {
     namedExports: {
       getOwnedRecordsByWorkspace: () => [record()],
+      resolveRootLauncher: (record) => record.launchedBy,
     },
   });
   return { agentEvents, inboundEvents };

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { execHcom, findLiveAgentByIdentifier, listHcomAgents, parseHcomJson } from "../hcom.js";
+import { execHcom, findLiveAgentByIdentifier, listHcomAgents, parseHcomJson, resolveCallerName } from "../hcom.js";
 import {
   getConfigPaths,
   loadMergedConfig,
@@ -13,11 +13,16 @@ import {
   persistReconciledState,
   reconcileGlobalRecords,
   reconcileManagedRecords,
+  resolveRootLauncher,
 } from "../registry.js";
 import type { HcomAgent, RegistryRecord } from "../types.js";
 import { E_INTERNAL, internalError } from "../errors.js";
 
-export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgent[]) {
+export function enrichManagedRecord(
+  record: RegistryRecord,
+  hcomAgents: HcomAgent[],
+  options: { caller?: string; records?: RegistryRecord[] } = {},
+) {
   const liveAgent = matchLiveAgent(record, hcomAgents);
 
   let managementType: string;
@@ -32,8 +37,18 @@ export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgen
     managementType = "managed";
   }
 
+  // Provenance (#33 follow-up): whose lane this agent belongs to. foreign
+  // is true when the launcher is not the calling hub — a distinct field,
+  // never silently mixed into the caller's own fleet.
+  const rootLaunchedBy =
+    resolveRootLauncher(record, options.records ?? [record]) ?? record.launchedBy ?? null;
+  const foreign = Boolean(options.caller && record.launchedBy && record.launchedBy !== options.caller);
+
   return {
     ...record,
+    launchedBy: record.launchedBy ?? null,
+    rootLaunchedBy,
+    foreign,
     managementType,
     liveFound: Boolean(liveAgent),
     liveName: liveAgent?.name ?? null,
@@ -52,11 +67,12 @@ export function enrichManagedRecord(record: RegistryRecord, hcomAgents: HcomAgen
 export function registerListManagedTool(server: any) {
   server.tool(
     "list_managed",
-    "List all hcom agents managed by this server in the current workspace, each record enriched with its live status. Read-only; no sender identity required. Related: list_all (all live agents), status (counts + health).",
+    "List all hcom agents managed by this server in the current workspace, each record enriched with its live status and launch provenance (launchedBy/rootLaunchedBy/foreign flags the records whose launcher is not the calling hub). Read-only; no sender identity required. Related: list_all (all live agents), status (counts + health).",
     {
       workspace: z.string().optional().describe("Workspace path. Defaults to the server's working directory. Pass explicitly when the server runs under a service manager (its cwd is the service home, not your workspace) so records are scoped to the workspace you query with list_managed."),
+      sender_name: z.string().optional().describe("Caller identity used to flag foreign-launched records. Optional: bound hcom sessions may auto-resolve via 'hcom list self'; without it the foreign flag stays false."),
     },
-    async ({ workspace }: { workspace?: string }) => {
+    async ({ workspace, sender_name }: { workspace?: string; sender_name?: string }) => {
       const cwd = workspace ?? process.cwd();
 
       try {
@@ -65,7 +81,12 @@ export function registerListManagedTool(server: any) {
         const reconciled = reconcileManagedRecords(records, hcomAgents);
         persistReconciledState(records, reconciled);
 
-        const managed = reconciled.map((record) => enrichManagedRecord(record, hcomAgents));
+        // Caller is resolved tolerantly: unbound callers still get the full
+        // list, just without foreign flagging.
+        const caller = await resolveCallerName(sender_name);
+        const managed = reconciled.map((record) =>
+          enrichManagedRecord(record, hcomAgents, { caller, records }),
+        );
 
         return {
           content: [{
@@ -231,12 +252,20 @@ export function registerStatusTool(server: any) {
           globalReconcileTransitions: transitions,
           managedLostCount: reconciled.filter((record) => record.state === "managed_lost").length,
           managedReleasedCount: workspaceRecords.filter((record) => record.released).length,
+          // Provenance (#33 follow-up): who launched what in this workspace.
+          // Unattributed records (legacy/adopted) group under "(unattributed)".
+          byLauncher: reconciled.reduce<Record<string, number>>((acc, record) => {
+            const key = record.launchedBy ?? "(unattributed)";
+            acc[key] = (acc[key] ?? 0) + 1;
+            return acc;
+          }, {}),
           reportEvidence: reconciled
             .filter((record) => record.requireReport)
             .map((record) => ({
               id: record.id,
               hcomName: record.hcomName,
               state: record.state,
+              launchedBy: record.launchedBy ?? null,
               dispatchAt: record.dispatchAt ?? null,
             })),
         };

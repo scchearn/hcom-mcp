@@ -190,6 +190,7 @@ test('status reports the hcom version and the full state breakdown', async (t) =
       listHcomAgents: async () => [{ name: 'waka', base_name: 'waka', status: 'listening' }],
       listStoppedAgentNames: async () => [],
       parseHcomJson: JSON.parse,
+      resolveCallerName: async () => undefined,
       execHcom: async (args) => {
         if (args[0] === '--version') {
           return { exitCode: 0, stdout: 'hcom 0.7.25', stderr: '' };
@@ -225,7 +226,7 @@ test('status reports the hcom version and the full state breakdown', async (t) =
       }),
       matchLiveAgent: () => null,
       persistReconciledState: () => {},
-      reconcileManagedRecords: (records) => records,
+      resolveRootLauncher: (record) => record.launchedBy,      reconcileManagedRecords: (records) => records,
     },
   });
   t.mock.module('../dist/config.js', {
@@ -279,6 +280,7 @@ test('status reports hcomVersion null when the CLI version check fails', async (
       listHcomAgents: async () => [],
       listStoppedAgentNames: async () => [],
       parseHcomJson: JSON.parse,
+      resolveCallerName: async () => undefined,
       execHcom: async () => ({ exitCode: 1, stdout: '', stderr: 'not found' }),
     },
   });
@@ -287,6 +289,7 @@ test('status reports hcomVersion null when the CLI version check fails', async (
       getRecordsByWorkspace: () => [],
       getOwnedRecordsByWorkspace: () => [],
       reconcileGlobalRecords: async () => ({ records: [], transitions: [], liveAgents: [], stoppedNames: [] }),
+      resolveRootLauncher: (record) => record.launchedBy,
       matchLiveAgent: () => null,
       persistReconciledState: () => {},
       reconcileManagedRecords: (records) => records,
@@ -326,6 +329,7 @@ test('status caches the hcom version across calls', async (t) => {
       listHcomAgents: async () => [],
       listStoppedAgentNames: async () => [],
       parseHcomJson: JSON.parse,
+      resolveCallerName: async () => undefined,
       execHcom: async (args) => {
         if (args[0] === '--version') {
           versionCalls += 1;
@@ -344,6 +348,7 @@ test('status caches the hcom version across calls', async (t) => {
       getRecordsByWorkspace: () => [],
       getOwnedRecordsByWorkspace: () => [],
       reconcileGlobalRecords: async () => ({ records: [], transitions: [], liveAgents: [], stoppedNames: [] }),
+      resolveRootLauncher: (record) => record.launchedBy,
       matchLiveAgent: () => null,
       persistReconciledState: () => {},
       reconcileManagedRecords: (records) => records,

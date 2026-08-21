@@ -7,7 +7,7 @@ import {
   parseHcomJson,
   resolveCallerName,
 } from "../hcom.js";
-import { getOwnedRecordsByWorkspace } from "../registry.js";
+import { getOwnedRecordsByWorkspace, resolveRootLauncher } from "../registry.js";
 import type { HcomAgent, RegistryRecord } from "../types.js";
 import { E_INTERNAL, E_NO_SENDER, internalError, toolError } from "../errors.js";
 import {
@@ -170,6 +170,7 @@ export async function buildWatchLine(
   record: RegistryRecord,
   liveAgents: HcomAgent[],
   reportTimeoutSec: number,
+  options: { caller?: string; records?: RegistryRecord[] } = {},
 ): Promise<{
   name: string;
   status: string | null;
@@ -180,9 +181,17 @@ export async function buildWatchLine(
   lastMessage: string | null;
   report: ReportEvidence;
   wedgedQueue?: WedgedQueueEvidence;
+  // Provenance (#33 follow-up): whose lane this agent belongs to. foreign
+  // is true when the launcher is not the calling hub — surfaced as a field,
+  // never silently mixed.
+  launchedBy: string | null;
+  rootLaunchedBy: string | null;
+  foreign: boolean;
 }> {
   const live = findLiveAgentByIdentifier(record.hcomName ?? "", liveAgents);
   const flags: string[] = [];
+  const rootLaunchedBy = resolveRootLauncher(record, options.records ?? [record]) ?? record.launchedBy ?? null;
+  const foreign = Boolean(options.caller && record.launchedBy && record.launchedBy !== options.caller);
 
   if (!live) {
     flags.push("lost");
@@ -195,6 +204,9 @@ export async function buildWatchLine(
       lastLifeEvent: null,
       lastMessage: null,
       report: buildReportEvidence(record, [], []),
+      launchedBy: record.launchedBy ?? null,
+      rootLaunchedBy,
+      foreign,
     };
   }
 
@@ -247,6 +259,9 @@ export async function buildWatchLine(
     lastLifeEvent: lastLife,
     lastMessage: lastMessageText,
     report,
+    launchedBy: record.launchedBy ?? null,
+    rootLaunchedBy,
+    foreign,
     ...(wedgedQueue ? { wedgedQueue } : {}),
   };
 }
@@ -284,6 +299,10 @@ export function registerWatchAgentsTool(server: any) {
       try {
         const records = getOwnedRecordsByWorkspace(cwd);
         const liveAgents = await listHcomAgents();
+        // Resolved for both modes: subscribe requires it; poll uses it to
+        // flag lines whose launcher is not the calling hub. Unbound callers
+        // get undefined, which simply disables foreign flagging.
+        const caller = await resolveCallerName(sender_name);
 
         // Scope: explicit names (canonicalized) or tag, else all owned records.
         let scoped = records;
@@ -298,7 +317,6 @@ export function registerWatchAgentsTool(server: any) {
         }
 
         if (mode === "subscribe") {
-          const caller = await resolveCallerName(sender_name);
           if (!caller) {
             return toolError(
               E_NO_SENDER,
@@ -349,7 +367,7 @@ export function registerWatchAgentsTool(server: any) {
         // an unbounded fan-out over a large fleet would saturate the CLI.
         const lines: Awaited<ReturnType<typeof buildWatchLine>>[] = [];
         for (const record of scoped) {
-          lines.push(await buildWatchLine(record, liveAgents, timeoutSec));
+          lines.push(await buildWatchLine(record, liveAgents, timeoutSec, { caller, records }));
         }
 
         const summary = {

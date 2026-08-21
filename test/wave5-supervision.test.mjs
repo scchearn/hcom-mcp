@@ -55,6 +55,7 @@ function mockWatchDeps(t, { records, liveAgents, execHcom }) {
   t.mock.module('../dist/registry.js', {
     namedExports: {
       getOwnedRecordsByWorkspace: () => records,
+      resolveRootLauncher: (record) => record.launchedBy,
     },
   });
 }

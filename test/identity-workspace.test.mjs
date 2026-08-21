@@ -244,6 +244,7 @@ test('inspect resolves a tag-prefixed display name to the live record', async (t
         throw new Error(`unexpected args: ${args.join(' ')}`);
       },
       parseHcomJson: JSON.parse,
+      resolveCallerName: async () => undefined,
     },
   });
   t.mock.module('../dist/registry.js', {
@@ -370,6 +371,7 @@ test('list_all accepts a workspace param and resolves records against it', async
       findLiveAgentByIdentifier: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id) ?? null,
       parseHcomJson: JSON.parse,
+      resolveCallerName: async () => undefined,
       execHcom: async () => ({ exitCode: 0, stdout: 'hcom 0.0.0', stderr: '' }),
     },
   });
@@ -386,6 +388,7 @@ test('list_all accepts a workspace param and resolves records against it', async
       persistReconciledState: () => {},
       reconcileManagedRecords: (records) => records,
       reconcileGlobalRecords: async () => ({ records: [], transitions: [], liveAgents: [], stoppedNames: [] }),
+      resolveRootLauncher: (record) => record.launchedBy,
     },
   });
 

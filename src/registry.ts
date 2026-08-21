@@ -573,6 +573,35 @@ export function persistReconciledState(before: RegistryRecord[], after: Registry
 }
 
 /**
+ * Resolve the root launcher of a record's resume/fork chain: follow
+ * resumedFrom links (record id for resumes, hcom name for forks) back to
+ * the origin record and return ITS launchedBy. Ambiguous or missing links
+ * stop the walk early (conservative); cycles are broken by a visited set.
+ */
+export function resolveRootLauncher(
+  record: Pick<RegistryRecord, "id" | "launchedBy" | "resumedFrom">,
+  records: RegistryRecord[],
+): string | undefined {
+  const visited = new Set<string>([record.id]);
+  let current: Pick<RegistryRecord, "id" | "launchedBy" | "resumedFrom"> = record;
+  for (let depth = 0; depth < 32; depth++) {
+    const ref = current.resumedFrom;
+    if (!ref) break;
+    let parent = records.find((r) => r.id === ref && !visited.has(r.id));
+    if (!parent) {
+      // Fork provenance stores the source agent NAME; only follow it when
+      // exactly one candidate exists, never guess between namesakes.
+      const nameMatches = records.filter((r) => r.hcomName === ref && !visited.has(r.id));
+      parent = nameMatches.length === 1 ? nameMatches[0] : undefined;
+    }
+    if (!parent) break;
+    visited.add(parent.id);
+    current = parent;
+  }
+  return current.launchedBy ?? record.launchedBy;
+}
+
+/**
  * Reconcile EVERY non-released owned record against live hcom state,
  * regardless of workspace, and persist any state transitions in one batched
  * write.
