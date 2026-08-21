@@ -59,6 +59,7 @@ function hcomMock(overrides = {}) {
 // Complete registry.js mock for tests that must not touch the real registry.
 function registryMock(overrides = {}) {
   return {
+    REGISTRY_PATH: '/tmp/hcom-mcp-registry.json',
     getOwnedRecordsByWorkspace: () => [],
     getRecordsByWorkspace: () => [],
     addRecord: (record) => ({ ...record, id: 'record-1' }),
@@ -70,8 +71,9 @@ function registryMock(overrides = {}) {
     pruneRecords: async () => ({ removed: [], wouldRemove: [] }),
     matchLiveAgent: () => null,
     persistReconciledState: () => {},
+    resolveRootLauncher: (record) => record.launchedBy,
     reconcileManagedRecords: (records) => records,
-    reconcileWorkspaceRecords: async () => [],
+    reconcileGlobalRecords: async () => ({ records: [], transitions: [], liveAgents: [], stoppedNames: [] }),
     ...overrides,
   };
 }
@@ -390,6 +392,9 @@ test('launch count spawns N agents in one hcom call with a [N] prefix', async (t
   t.mock.module('../dist/hcom.js', {
     namedExports: hcomMock({
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         launchedArgs.push(args);
         return {
           exitCode: 0,
@@ -440,6 +445,9 @@ test('launch without count does not add a [N] prefix', async (t) => {
   t.mock.module('../dist/hcom.js', {
     namedExports: hcomMock({
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         launchedArgs.push(args);
         return { exitCode: 0, stdout: 'Names: waka\nBatch id: batch-1\n', stderr: '' };
       },
@@ -617,6 +625,9 @@ test('codex launch returns a reasoningNote and never passes reasoning flags', as
   t.mock.module('../dist/hcom.js', {
     namedExports: hcomMock({
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: waka\nBatch id: batch-1\n', stderr: '' };
       },
@@ -665,6 +676,9 @@ test('watch_agents poll returns camelCase keys and subscribe returns subId', asy
         }
         if (args[0] === 'events' && args.includes('--type') && args.includes('life')) {
           return { exitCode: 0, stdout: '{"action":"ready"}\n', stderr: '' };
+        }
+        if (args[0] === 'events' && args.includes('--type') && args.includes('status')) {
+          return { exitCode: 0, stdout: '', stderr: '' };
         }
         if (args[0] === 'events' && args.includes('--type') && args.includes('message')) {
           if (args[args.length - 1] === 'sile') {
@@ -741,6 +755,9 @@ test('antigravity launch never passes --model', async (t) => {
   t.mock.module('../dist/hcom.js', {
     namedExports: hcomMock({
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: waka\nBatch id: batch-1\n', stderr: '' };
       },

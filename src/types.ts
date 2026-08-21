@@ -71,6 +71,124 @@ export const OwnershipStateEnum = z.enum([
 ]);
 export type OwnershipState = z.infer<typeof OwnershipStateEnum>;
 
+// --- Supervision policy (#33) ---
+
+// Defaults per issue #33: first alert at three minutes of silence,
+// escalation at six minutes total, measured from the dispatch/activity
+// baseline. Every layer (global config, preset, per-launch) may override
+// individual fields; unresolved fields fall through to the next layer.
+export const SupervisionPolicyInputSchema = z.object({
+  enabled: z.boolean().optional(),
+  attentionAfterSec: z.number().int().positive().optional(),
+  escalateAfterSec: z.number().int().positive().optional(),
+});
+export type SupervisionPolicyInput = z.infer<typeof SupervisionPolicyInputSchema>;
+
+export const SupervisionPolicySchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    attentionAfterSec: z.number().int().positive().default(180),
+    escalateAfterSec: z.number().int().positive().default(360),
+  })
+  // Ordering is semantic (#33: alert at three minutes, escalation at six
+  // total). Every layer parses through this schema, so a nonsense config
+  // (escalation before the first alert) is rejected wherever it is set.
+  .refine((policy) => policy.escalateAfterSec > policy.attentionAfterSec, {
+    message: "escalateAfterSec must exceed attentionAfterSec",
+  });
+export type SupervisionPolicy = z.infer<typeof SupervisionPolicySchema>;
+
+// One installed hcom event subscription on behalf of the launching hub.
+// Persisted so restarts (M4) can dedupe and terminal cleanup (M4) can remove.
+export const SupervisionSubscriptionSchema = z.object({
+  kind: z.enum(["life", "blocked"]),
+  subId: z.string(),
+});
+export type SupervisionSubscription = z.infer<typeof SupervisionSubscriptionSchema>;
+
+// --- #33 M2: watchdog incidents ---
+
+export const SupervisionIncidentTypeEnum = z.enum([
+  "blocked",
+  "stalled_active",
+  "stalled_listening",
+  "stopped_unreported",
+  "lost",
+]);
+export type SupervisionIncidentType = z.infer<typeof SupervisionIncidentTypeEnum>;
+
+export const RescueAttemptSchema = z.object({
+  at: z.string(),
+  outcome: z.string(),
+});
+export type RescueAttempt = z.infer<typeof RescueAttemptSchema>;
+
+export const SupervisionIncidentSchema = z.object({
+  type: SupervisionIncidentTypeEnum,
+  openedAt: z.string(),
+  // Activity generation at open: the fingerprint of the latest meaningful
+  // activity this incident was opened against. A NEWER generation means
+  // work resumed and resolves the incident; the same generation keeps the
+  // alert budget capped (one attention alert, one escalation).
+  generation: z.string(),
+  // Dedup fingerprint (#33): worker + incident type + activity generation.
+  // One incident per fingerprint ever alerts more than the two-level budget.
+  fingerprint: z.string().optional(),
+  // Outstanding dispatch intent captured at OPEN time (M6): tier2's
+  // wake-intent gate checks THIS, never the newest inbound message — the
+  // supervisor's own tier1 wake is a request and would otherwise satisfy
+  // the allowlist it manufactured.
+  dispatchIntent: z.string().nullish(),
+  alertsSent: z.number().int().min(0).default(0),
+  lastAlertAt: z.string().optional(),
+  // True when the last hub notification could not be delivered (missing
+  // hub or hcom send failure). The incident is retained either way and
+  // surfaced through status / list_managed / watch_agents.
+  deliveryFailed: z.boolean().default(false),
+  // Wake-ladder attempts (owner decision, issue #33 comment): tier1 =
+  // in-band ack-requested send at open; tier2 = extended unblock after one
+  // escalation window. One attempt per tier per incident generation.
+  tier1: RescueAttemptSchema.optional(),
+  tier2: RescueAttemptSchema.optional(),
+  // Set when the incident is CLOSED (terminal cleanup / resolution):
+  // retained as lifecycle evidence under supervision.lastIncident.
+  closedAt: z.string().optional(),
+});
+export type SupervisionIncident = z.infer<typeof SupervisionIncidentSchema>;
+
+// Per-record supervision state. Optional on every record: legacy records
+// rehydrate without it, and released/adopted records never carry it unless
+// supervision was attached when they were created.
+export const SupervisionStateSchema = z.object({
+  // Hub to notify (the launcher recorded at launch time).
+  hub: z.string(),
+  // Effective policy after global -> preset -> per-launch resolution.
+  policy: SupervisionPolicySchema,
+  // Installed subscription ids, keyed by kind, for dedupe and cleanup.
+  subscriptions: z.array(SupervisionSubscriptionSchema).default([]),
+  // Kinds whose installation failed at launch time. A shorter
+  // subscriptions array alone is indistinguishable from "not installed
+  // yet"; this makes a degraded push lane visible to the M2 sweep, which
+  // reads records — not launch responses — and must lean harder on the
+  // watchdog lane for this worker.
+  installErrors: z.array(z.string()).optional(),
+  // Silence baseline: the dispatch timestamp supervision measures from.
+  baselineAt: z.string(),
+  // Latest meaningful activity evidence (harness-adapter output, M2).
+  lastActivityAt: z.string().optional(),
+  lastActivityKind: z.string().optional(),
+  // Open incident, if any. Absence = healthy (or resolved by newer
+  // activity). Persisted BEFORE hub notification per issue #33.
+  incident: SupervisionIncidentSchema.optional(),
+  // Routine lifecycle inform (#33): timestamp of the "completed/stopped
+  // cleanly" inform for the CURRENT stopped episode, so it is sent once
+  // per stop; cleared whenever the agent is live again.
+  cleanStopInformedAt: z.string().optional(),
+  // Most recently CLOSED incident, kept as lifecycle evidence (m11).
+  lastIncident: SupervisionIncidentSchema.optional(),
+});
+export type SupervisionState = z.infer<typeof SupervisionStateSchema>;
+
 // --- Agent preset schema ---
 
 export const HarnessVariantSchema = z.object({
@@ -110,6 +228,9 @@ export const AgentPresetSharedSchema = z.object({
   // Persisted as expiresAt on the registry record; prune expired=true kills
   // and clears them. No background reaper — lazy enforcement at next look.
   ttlMinutes: z.number().int().positive().max(5256000).optional(),
+  // Supervision policy override (#33). Partial: unset fields fall through to
+  // the global default at launch-time resolution.
+  supervision: SupervisionPolicyInputSchema.optional(),
 });
 
 export const AgentPresetSchema = AgentPresetSharedSchema.extend({
@@ -170,6 +291,10 @@ export const RescueAllowlistSchema = z.object({
     "select a model",
     "choose a provider",
   ]),
+  // #33 wake ladder (tier2): the outstanding dispatch intents a supervision
+  // rescue may auto-inject against. `request` only by default — ambiguous
+  // silence around broadcasts/informs is never auto-woken via PTY.
+  wakeIntents: z.array(z.enum(["request", "inform", "ack"])).default(["request"]),
 });
 export type RescueAllowlist = z.infer<typeof RescueAllowlistSchema>;
 
@@ -179,6 +304,9 @@ export const GlobalConfigInputSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetInputSchema).default({}),
   topologyPresets: z.record(z.string(), TopologyPresetSchema).default({}),
   rescueAllowlist: RescueAllowlistSchema.default({}),
+  // #33 supervision defaults. Partial: unset fields fall through to the
+  // built-in policy defaults (enabled, 180s attention, 360s escalation).
+  supervision: SupervisionPolicyInputSchema.default({}),
 });
 export type GlobalConfigInput = z.infer<typeof GlobalConfigInputSchema>;
 
@@ -186,6 +314,7 @@ export const GlobalConfigSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetSchema).default({}),
   topologyPresets: z.record(z.string(), TopologyPresetSchema).default({}),
   rescueAllowlist: RescueAllowlistSchema.default({}),
+  supervision: SupervisionPolicySchema.default({}),
 });
 export type GlobalConfig = z.infer<typeof GlobalConfigSchema>;
 
@@ -211,6 +340,8 @@ export const MergedConfigSchema = z.object({
   agentPresets: z.record(z.string(), AgentPresetSchema),
   topologyPresets: z.record(z.string(), TopologyPresetSchema),
   rescueAllowlist: RescueAllowlistSchema.default({}),
+  // #33 supervision defaults carried from the global config.
+  supervision: SupervisionPolicySchema.default({}),
 });
 export type MergedConfig = z.infer<typeof MergedConfigSchema>;
 
@@ -249,6 +380,9 @@ export const RegistryRecordSchema = z.object({
   // Handoff provenance: set on records created by resume/fork, linking the
   // new record to the source agent's record id (resume) or name (fork).
   resumedFrom: z.string().optional(),
+  // #33 supervision state. Optional: legacy records rehydrate without it,
+  // and only supervised launches attach it.
+  supervision: SupervisionStateSchema.optional(),
 });
 export type RegistryRecord = z.infer<typeof RegistryRecordSchema>;
 
@@ -268,5 +402,22 @@ export const HcomAgentSchema = z.object({
   directory: z.string().optional(),
   session_id: z.string().optional(),
   headless: z.boolean().optional(),
+  // Evidence fields hcom reports beyond the core shape (#33 supervision):
+  // incident diagnostics need the transcript/log locations and launch
+  // context without re-parsing raw CLI output later.
+  //
+  // Typed against MEASURED `hcom list --json` output (gimu, 2026-08-21):
+  // agent_id and parent_name are always null; background_log_file and
+  // transcript_path are string-or-null; created_at is epoch seconds as a
+  // FLOAT, not an ISO string — `new Date(agent.created_at)` on the string
+  // overload would silently yield 1970.
+  agent_id: z.string().nullish(),
+  background_log_file: z.string().nullish(),
+  transcript_path: z.string().nullish(),
+  created_at: z.number().optional(),
+  parent_name: z.string().nullish(),
+  process_bound: z.boolean().optional(),
+  hooks_bound: z.boolean().optional(),
+  launch_context: z.record(z.string(), z.unknown()).optional(),
 });
 export type HcomAgent = z.infer<typeof HcomAgentSchema>;

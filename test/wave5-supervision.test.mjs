@@ -55,6 +55,7 @@ function mockWatchDeps(t, { records, liveAgents, execHcom }) {
   t.mock.module('../dist/registry.js', {
     namedExports: {
       getOwnedRecordsByWorkspace: () => records,
+      resolveRootLauncher: (record) => record.launchedBy,
     },
   });
 }
@@ -81,6 +82,9 @@ test('watch_agents poll derives blocked, silent_finisher, stalled, lost, unrepor
       eventsCalls.push(args);
       if (args[0] === 'events' && args.includes('--type') && args.includes('life')) {
         return { exitCode: 0, stdout: '{"action":"ready"}\n', stderr: '' };
+      }
+      if (args[0] === 'events' && args.includes('--type') && args.includes('status')) {
+        return { exitCode: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'events' && args.includes('--type') && args.includes('message')) {
         // sile has a last report (silent finisher); fine has none (plain idle).

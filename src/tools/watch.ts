@@ -7,8 +7,9 @@ import {
   parseHcomJson,
   resolveCallerName,
 } from "../hcom.js";
-import { getOwnedRecordsByWorkspace } from "../registry.js";
-import type { HcomAgent, RegistryRecord } from "../types.js";
+import { getOwnedRecordsByWorkspace, resolveRootLauncher } from "../registry.js";
+import { installSubscription } from "../supervision.js";
+import type { HcomAgent, RegistryRecord, SupervisionIncident } from "../types.js";
 import { E_INTERNAL, E_NO_SENDER, internalError, toolError } from "../errors.js";
 import {
   eventData,
@@ -46,18 +47,22 @@ interface ReportEvidence {
  * Returns [] for non-JSON output so a CLI format drift degrades to "no
  * events" instead of a hard error.
  */
-async function fetchAgentEvents(name: string): Promise<HcomEvent[]> {
-  const [life, message] = await Promise.all([
-    execHcom(["events", "--last", "200", "--type", "life", "--agent", name]),
-    execHcom(["events", "--last", "200", "--type", "message", "--agent", name]),
+export async function fetchAgentEvents(name: string, execHcomFn: typeof execHcom = execHcom): Promise<HcomEvent[]> {
+  const [life, message, status] = await Promise.all([
+    execHcomFn(["events", "--last", "200", "--type", "life", "--agent", name]),
+    execHcomFn(["events", "--last", "200", "--type", "message", "--agent", name]),
+    // Status transitions (active work, tool/command/file context) are two
+    // of the five meaningful-activity signals — without this query they
+    // can never fire and every long tool call looks like a stall.
+    execHcomFn(["events", "--last", "200", "--type", "status", "--agent", name]),
   ]);
-  return [life, message]
+  return [life, message, status]
     .filter((result) => result.exitCode === 0)
     .flatMap((result) => parseHcomEvents(result.stdout));
 }
 
-async function fetchInboundEvents(name: string): Promise<HcomEvent[]> {
-  const result = await execHcom(["events", "--last", "200", "--type", "message", "--mention", name]);
+export async function fetchInboundEvents(name: string, execHcomFn: typeof execHcom = execHcom): Promise<HcomEvent[]> {
+  const result = await execHcomFn(["events", "--last", "200", "--type", "message", "--mention", name]);
   if (result.exitCode !== 0) return [];
   return parseHcomEvents(result.stdout);
 }
@@ -80,8 +85,8 @@ function isAgentConsumptionEvent(event: HcomEvent, agentName: string, dispatchMs
   );
 }
 
-async function fetchTermTail(name: string): Promise<string> {
-  const result = await execHcom(["term", name, "--json"]);
+async function fetchTermTail(name: string, execHcomFn: typeof execHcom = execHcom): Promise<string> {
+  const result = await execHcomFn(["term", name, "--json"]);
   if (result.exitCode !== 0) return `(hcom term failed: ${result.stderr || result.stdout})`;
   const parsed = parseHcomJson<{ lines?: unknown }>(result.stdout);
   if (parsed && Array.isArray(parsed.lines)) {
@@ -90,10 +95,12 @@ async function fetchTermTail(name: string): Promise<string> {
   return result.stdout.slice(-4000);
 }
 
-async function detectWedgedQueue(
+export async function detectWedgedQueue(
   live: HcomAgent,
   agentEvents: HcomEvent[],
   inboundEvents: HcomEvent[],
+  nowMs: number = Date.now(),
+  execHcomFn: typeof execHcom = execHcom,
 ): Promise<WedgedQueueEvidence | undefined> {
   if (live.tool !== "opencode" || live.status !== "listening") return undefined;
 
@@ -109,14 +116,14 @@ async function detectWedgedQueue(
     return undefined;
   }
 
-  const ageSeconds = Math.floor((Date.now() - latestDispatch.timestamp) / 1000);
+  const ageSeconds = Math.floor((nowMs - latestDispatch.timestamp) / 1000);
   if (ageSeconds < WEDGED_QUEUE_THRESHOLD_SEC) return undefined;
 
   return {
     evidenceTimestamp: eventTimestamp(latestDispatch.event) ?? new Date(latestDispatch.timestamp).toISOString(),
     ageSeconds,
     dispatchIntent: messageFields(latestDispatch.event).intent ?? null,
-    termTail: await fetchTermTail(live.base_name),
+    termTail: await fetchTermTail(live.base_name, execHcomFn),
   };
 }
 
@@ -170,6 +177,7 @@ export async function buildWatchLine(
   record: RegistryRecord,
   liveAgents: HcomAgent[],
   reportTimeoutSec: number,
+  options: { caller?: string; records?: RegistryRecord[] } = {},
 ): Promise<{
   name: string;
   status: string | null;
@@ -180,9 +188,19 @@ export async function buildWatchLine(
   lastMessage: string | null;
   report: ReportEvidence;
   wedgedQueue?: WedgedQueueEvidence;
+  // Open supervision incident (#33), if any.
+  incident: SupervisionIncident | null;
+  // Provenance (#33 follow-up): whose lane this agent belongs to. foreign
+  // is true when the launcher is not the calling hub — surfaced as a field,
+  // never silently mixed.
+  launchedBy: string | null;
+  rootLaunchedBy: string | null;
+  foreign: boolean;
 }> {
   const live = findLiveAgentByIdentifier(record.hcomName ?? "", liveAgents);
   const flags: string[] = [];
+  const rootLaunchedBy = resolveRootLauncher(record, options.records ?? [record]) ?? record.launchedBy ?? null;
+  const foreign = Boolean(options.caller && record.launchedBy && record.launchedBy !== options.caller);
 
   if (!live) {
     flags.push("lost");
@@ -195,6 +213,10 @@ export async function buildWatchLine(
       lastLifeEvent: null,
       lastMessage: null,
       report: buildReportEvidence(record, [], []),
+      incident: record.supervision?.incident ?? null,
+      launchedBy: record.launchedBy ?? null,
+      rootLaunchedBy,
+      foreign,
     };
   }
 
@@ -247,6 +269,10 @@ export async function buildWatchLine(
     lastLifeEvent: lastLife,
     lastMessage: lastMessageText,
     report,
+    incident: record.supervision?.incident ?? null,
+    launchedBy: record.launchedBy ?? null,
+    rootLaunchedBy,
+    foreign,
     ...(wedgedQueue ? { wedgedQueue } : {}),
   };
 }
@@ -284,6 +310,10 @@ export function registerWatchAgentsTool(server: any) {
       try {
         const records = getOwnedRecordsByWorkspace(cwd);
         const liveAgents = await listHcomAgents();
+        // Resolved for both modes: subscribe requires it; poll uses it to
+        // flag lines whose launcher is not the calling hub. Unbound callers
+        // get undefined, which simply disables foreign flagging.
+        const caller = await resolveCallerName(sender_name);
 
         // Scope: explicit names (canonicalized) or tag, else all owned records.
         let scoped = records;
@@ -298,7 +328,6 @@ export function registerWatchAgentsTool(server: any) {
         }
 
         if (mode === "subscribe") {
-          const caller = await resolveCallerName(sender_name);
           if (!caller) {
             return toolError(
               E_NO_SENDER,
@@ -311,18 +340,19 @@ export function registerWatchAgentsTool(server: any) {
             const name = record.hcomName;
             if (!name) continue;
             for (const kind of ["life", "blocked"] as const) {
-              const args =
-                kind === "life"
-                  ? ["events", "sub", "--for", caller, "--agent", name, "--type", "life"]
-                  : ["events", "sub", "--for", caller, "--status", "blocked", "--agent", name];
-              const result = await execHcom(args);
-              const subId = result.stdout.match(/sub-[a-f0-9]+/)?.[0] ?? null;
-              subscriptions.push({
-                agent: name,
-                kind,
-                subId,
-                ...(result.exitCode !== 0 ? { error: result.stderr || result.stdout } : {}),
-              });
+              try {
+                // Shared installer with the supervision lane (#33): one arg
+                // builder, one stdout sub-id parse.
+                const sub = await installSubscription(caller, name, kind, execHcom);
+                subscriptions.push({ agent: name, kind, subId: sub.subId });
+              } catch (err: any) {
+                subscriptions.push({
+                  agent: name,
+                  kind,
+                  subId: null,
+                  ...(err?.message ? { error: String(err.message) } : {}),
+                });
+              }
             }
           }
 
@@ -349,7 +379,7 @@ export function registerWatchAgentsTool(server: any) {
         // an unbounded fan-out over a large fleet would saturate the CLI.
         const lines: Awaited<ReturnType<typeof buildWatchLine>>[] = [];
         for (const record of scoped) {
-          lines.push(await buildWatchLine(record, liveAgents, timeoutSec));
+          lines.push(await buildWatchLine(record, liveAgents, timeoutSec, { caller, records }));
         }
 
         const summary = {
@@ -360,6 +390,7 @@ export function registerWatchAgentsTool(server: any) {
           wedged_queue: lines.filter((l) => l.flags.includes("wedged_queue")).length,
           lost: lines.filter((l) => l.flags.includes("lost")).length,
           unreported: lines.filter((l) => l.flags.includes("unreported")).length,
+          incidents: lines.filter((l) => l.incident).length,
           healthy: lines.filter((l) => l.flags.length === 0).length,
         };
 

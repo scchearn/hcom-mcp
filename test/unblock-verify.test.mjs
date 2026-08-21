@@ -604,6 +604,9 @@ function mockVerifyDeps(t, { execHcom, runUnblock, allowlist, config, addedRecor
 
 test('spawn_and_verify reports ready and persists the outcome', async (t) => {
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 0, stdout: '{"data":{"status":"ready"}}', stderr: '' };
     }
@@ -640,6 +643,9 @@ test('spawn_and_verify reports ready and persists the outcome', async (t) => {
 test('spawn_and_verify persists require_report when requested', async (t) => {
   const addedRecords = [];
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 0, stdout: '{"data":{"status":"ready"}}', stderr: '' };
     }
@@ -668,6 +674,9 @@ test('spawn_and_verify persists require_report when requested', async (t) => {
 
 test('spawn_and_verify classifies a blocked agent and includes the screen tail', async (t) => {
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 2, stdout: BLOCKED_EVENT_JSON, stderr: '' };
     }
@@ -701,6 +710,9 @@ test('spawn_and_verify classifies a blocked agent and includes the screen tail',
 
 test('spawn_and_verify rescues a blocked agent and transitions to active', async (t) => {
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 2, stdout: BLOCKED_EVENT_JSON, stderr: '' };
     }
@@ -741,6 +753,9 @@ test('spawn_and_verify rescues a blocked agent and transitions to active', async
 
 test('spawn_and_verify maps a failed gate to managed_lost', async (t) => {
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 1, stdout: '{"data":{"reason":"launch failed"}}', stderr: '' };
     }
@@ -771,6 +786,9 @@ test('spawn_and_verify maps a failed gate to managed_lost', async (t) => {
 
 test('spawn_and_verify maps a gate timeout to timeout', async (t) => {
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 2, stdout: '{"data":{"reason":"timeout after 30s"}}', stderr: '' };
     }
@@ -821,6 +839,9 @@ test('launch_topology with verify=true gates each agent and reports outcomes', a
   let launchCount = 0;
   const addedRecords = [];
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       return { exitCode: 0, stdout: '{"data":{"status":"ready"}}', stderr: '' };
     }
@@ -882,6 +903,9 @@ test('launch_topology with verify=true gates each agent and reports outcomes', a
 test('launch_topology without verify does not gate', async (t) => {
   let launchCount = 0;
   const execHcom = async (args) => {
+    if (args[0] === 'events' && args[1] === 'sub') {
+      return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+    }
     if (args[0] === 'events' && args[1] === 'launch') {
       throw new Error('gate should not run without verify=true');
     }

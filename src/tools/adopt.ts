@@ -90,6 +90,8 @@ export function registerAdoptTool(server: any) {
             harness,
             hcomName: canonicalName,
             sessionId: liveAgent.session_id,
+            // No launchedBy: manual adopts are never supervised (#33/#37).
+            launchMode: liveAgent.headless === false ? "headed" : "headless",
           });
 
           // ponytail: one-shot inform, not a thread; upgrade to thread if durability needed

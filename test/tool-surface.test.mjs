@@ -503,6 +503,9 @@ test('launch_topology expands roles by count and tracks each launched worker', a
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         launchedArgs.push(args);
         const workerNumber = launchedArgs.length;
         return {
@@ -1541,6 +1544,9 @@ test('bare launch with harness + model builds correct command', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },
@@ -1599,6 +1605,9 @@ test('preset + model override uses the override model', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },
@@ -1662,6 +1671,9 @@ test('bare launch tag defaults to harness name', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },
@@ -1699,6 +1711,9 @@ test('custom tag overrides default', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },
@@ -1737,6 +1752,9 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions 
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args, options) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         capturedOptions = options;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -1824,6 +1842,9 @@ test('headless opencode launch injects OPENCODE_CONFIG_CONTENT with permissions,
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args, options) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         capturedOptions = options;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
@@ -1868,6 +1889,9 @@ test('claude harness with reasoning xhigh includes --effort xhigh', async (t) =>
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },
@@ -1904,6 +1928,9 @@ test('no reasoning produces no --variant or --effort flag', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },
@@ -1940,6 +1967,9 @@ test('codex harness with reasoning produces no flag', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },
@@ -1977,6 +2007,9 @@ test('bare launch with reasoning uses correct flag per harness', async (t) => {
     namedExports: {
       resolveCallerName: async (override) => override,
       execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          return { exitCode: 0, stdout: 'Subscription sub-abc123 created', stderr: '' };
+        }
         capturedArgs = args;
         return { exitCode: 0, stdout: 'Names: test-agent\nBatch id: batch-123\n', stderr: '' };
       },

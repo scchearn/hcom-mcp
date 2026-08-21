@@ -23,6 +23,7 @@ import { registerWatchAgentsTool } from "./tools/watch.js";
 import { registerResumeForkTools } from "./tools/resume_fork.js";
 import { registerSendTool } from "./tools/send.js";
 import { isHcomAvailable } from "./hcom.js";
+import { startSupervisor } from "./supervisor.js";
 
 const PORT = parseInt(process.env.HCOM_MCP_PORT ?? "3111", 10);
 
@@ -104,7 +105,12 @@ async function main() {
     console.error(`hcom-mcp HTTP server listening on http://127.0.0.1:${PORT}/mcp`);
   });
 
+  // #33: in-process supervision loop. Rehydrates from the registry on start
+  // (deadlines live in the records, not in memory) and sweeps every 30s.
+  const stopSupervisor = startSupervisor();
+
   const shutdown = () => {
+    stopSupervisor();
     httpServer.close(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

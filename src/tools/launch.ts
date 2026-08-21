@@ -4,8 +4,9 @@ import type { ExecOptions, ModelDiscoveryResult } from "../hcom.js";
 import { parseLaunchGateResult, parseLifeEvents, parseTermJson } from "../gate.js";
 import { loadMergedConfig, resolveAgentPreset, resolveTopologyPreset, validateTopologyReferences } from "../config.js";
 import { addRecord, removeRecords, updateRecordState, updateRecordVerify } from "../registry.js";
+import { ensureSupervisionSubscriptions, resolveSupervisionPolicy, type SubscriptionInstall } from "../supervision.js";
 import { HARNESS_COMMAND, HarnessEnum } from "../types.js";
-import type { AgentPreset, Harness, OwnershipState } from "../types.js";
+import type { AgentPreset, Harness, OwnershipState, RegistryRecord, SupervisionPolicy, SupervisionPolicyInput } from "../types.js";
 import {
   E_AGENT_NOT_FOUND,
   E_HARNESS_REQUIRED,
@@ -32,6 +33,9 @@ type ResolvedLaunchPreset = {
   systemPrompt?: string;
   reasoning?: string;
   ttlMinutes?: number;
+  // #33 preset-level supervision override; resolved against global config
+  // and per-launch params at launch time.
+  supervision?: SupervisionPolicyInput;
 };
 
 type LaunchResult = {
@@ -46,6 +50,15 @@ type LaunchResult = {
   reason?: string;
   // Present when a claude model was passed through unverified (see #16).
   modelNote?: string;
+  // Present when the launch is supervised (#33): effective policy plus the
+  // subscriptions installed per worker on behalf of the launching hub.
+  supervision?: {
+    policy: SupervisionPolicy;
+    agents: SubscriptionInstall[];
+  };
+  // Present when supervision was requested but could not be attached —
+  // e.g. a programmatic caller without sender identity. Never silent.
+  supervisionNote?: string;
 };
 
 export type { LaunchResult };
@@ -85,6 +98,7 @@ function resolvePresetHarness(
     systemPrompt: preset.systemPrompt,
     reasoning: variant.reasoning,
     ttlMinutes: preset.ttlMinutes,
+    supervision: preset.supervision,
   };
 }
 
@@ -163,6 +177,40 @@ export async function validatePresetModelAvailability(
 }
 
 /**
+ * Shared #33 supervision parameters for the launch tools. Supervision is ON
+ * by default; `supervise: false` is the explicit fire-and-forget opt-out.
+ */
+function supervisionToolParams() {
+  return {
+    supervise: z.boolean().optional().default(true).describe("Automatic supervision (#33): installs lifecycle/blocked event subscriptions on behalf of the hub and enables watchdog sweeps. Set false to opt out for fire-and-forget launches (default: true)."),
+    attention_after_sec: z.number().int().positive().optional().describe("Per-launch supervision override: seconds of silence before the hub is alerted (default: global config, else 180)."),
+    escalate_after_sec: z.number().int().positive().optional().describe("Per-launch supervision override: total seconds from baseline before escalation (default: global config, else 360)."),
+  };
+}
+
+type SupervisionToolParams = {
+  supervise?: boolean;
+  attention_after_sec?: number;
+  escalate_after_sec?: number;
+};
+
+/**
+ * Resolve the effective policy for one launch: global config -> preset
+ * override -> per-launch parameters.
+ */
+function resolveLaunchSupervision(
+  global: SupervisionPolicyInput | undefined,
+  presetOverride: SupervisionPolicyInput | undefined,
+  params: SupervisionToolParams,
+): SupervisionPolicy {
+  return resolveSupervisionPolicy(global, presetOverride, {
+    enabled: params.supervise === false ? false : undefined,
+    ...(params.attention_after_sec !== undefined ? { attentionAfterSec: params.attention_after_sec } : {}),
+    ...(params.escalate_after_sec !== undefined ? { escalateAfterSec: params.escalate_after_sec } : {}),
+  });
+}
+
+/**
  * Register the launch tool for single-agent launch.
  */
 export function registerLaunchTool(server: any) {
@@ -182,8 +230,9 @@ export function registerLaunchTool(server: any) {
       reasoning: z.string().optional().describe("Reasoning effort level (opencode: --variant, claude: --effort, codex: ignored — a reasoningNote is returned on the result)"),
       require_report: z.boolean().optional().default(false).describe("Require an agent-originated report before stop/kill; force=true can override the close gate (default: false)."),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
+      ...supervisionToolParams(),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, count, workspace, sender_name, reasoning, ttl_minutes, require_report }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, count, workspace, sender_name, reasoning, ttl_minutes, require_report, supervise, attention_after_sec, escalate_after_sec }: {
       harness: Harness;
       preset?: string;
       model?: string;
@@ -196,6 +245,9 @@ export function registerLaunchTool(server: any) {
       reasoning?: string;
       ttl_minutes?: number;
       require_report?: boolean;
+      supervise?: boolean;
+      attention_after_sec?: number;
+      escalate_after_sec?: number;
     }) => {
       const cwd = workspace ?? process.cwd();
 
@@ -255,7 +307,10 @@ export function registerLaunchTool(server: any) {
           // Resolve effective prompt upstream
           resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
 
-          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, count ?? 1, require_report ?? false);
+          // #33: global config -> preset -> per-launch parameters.
+          const supervisionPolicy = resolveLaunchSupervision(config.supervision, resolvedPreset.supervision, { supervise, attention_after_sec, escalate_after_sec });
+
+          const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, count ?? 1, require_report ?? false, { policy: supervisionPolicy });
           return {
             content: [{
               type: "text" as const,
@@ -264,6 +319,7 @@ export function registerLaunchTool(server: any) {
           };
         } else {
           // Bare launch path — no preset, harness + model required
+          const config = loadMergedConfig(cwd);
           const resolvedPreset: ResolvedLaunchPreset = {
             name: "adhoc",
             harness,
@@ -277,8 +333,9 @@ export function registerLaunchTool(server: any) {
             reasoning,
             ttlMinutes: ttl_minutes,
           };
+          const supervisionPolicy = resolveLaunchSupervision(config.supervision, undefined, { supervise, attention_after_sec, escalate_after_sec });
 
-          const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName, count ?? 1, require_report ?? false);
+          const result = await launchAgent(resolvedPreset, { dir }, cwd, new Map(), callerName, count ?? 1, require_report ?? false, { policy: supervisionPolicy });
           return {
             content: [{
               type: "text" as const,
@@ -308,8 +365,9 @@ export function registerTopologyLaunchTool(server: any) {
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness when verify=true (default: 60)"),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes, applied to every role in the batch: records expire after this and prune expired=true kills + clears them. Overrides per-preset ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
       require_report: z.boolean().optional().default(false).describe("Require an agent-originated report before stop/kill for every launched role; force=true can override the close gate (default: false)."),
+      ...supervisionToolParams(),
     },
-    async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec, ttl_minutes, require_report }: {
+    async ({ topology: topologyName, workspace, sender_name, verify, ready_timeout_sec, ttl_minutes, require_report, supervise, attention_after_sec, escalate_after_sec }: {
       topology: string;
       workspace?: string;
       sender_name?: string;
@@ -317,6 +375,9 @@ export function registerTopologyLaunchTool(server: any) {
       ready_timeout_sec?: number;
       ttl_minutes?: number;
       require_report?: boolean;
+      supervise?: boolean;
+      attention_after_sec?: number;
+      escalate_after_sec?: number;
     }) => {
       const cwd = workspace ?? process.cwd();
 
@@ -385,7 +446,14 @@ export function registerTopologyLaunchTool(server: any) {
           try {
             // Batch-level TTL applies to every role when set on the topology call.
             if (ttl_minutes) resolved.ttlMinutes = ttl_minutes;
-            const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache, callerName, 1, require_report ?? false);
+            // #33: per-role policy resolution — the role's preset override
+            // sits between the global default and the batch-level params.
+            const supervisionPolicy = resolveLaunchSupervision(
+              config.supervision,
+              resolved.supervision,
+              { supervise, attention_after_sec, escalate_after_sec },
+            );
+            const result = await launchAgent(resolved, { prompt: resolved.prompt }, cwd, modelCatalogCache, callerName, 1, require_report ?? false, { policy: supervisionPolicy });
             launched.push(result);
             registryIds.push(...result.registryIds);
 
@@ -446,6 +514,7 @@ export async function launchAgent(
   launchedBy?: string,
   count: number = 1,
   requireReport: boolean = false,
+  supervision?: { policy: SupervisionPolicy },
 ): Promise<LaunchResult> {
   const validationError = await validatePresetModelAvailability(preset, catalogCache);
   if (validationError) {
@@ -572,6 +641,42 @@ export async function launchAgent(
     throw new Error(`hcom launch failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`);
   }
 
+  // #33: supervise every managed headless launch by default. Only live
+  // outcomes (0 = ready, 2 = alive but blocked/launching) get subscriptions;
+  // a spawn failure killed its corpses and has nothing to watch. Install
+  // BEFORE addRecord so the subscription ids persist in the same write.
+  // #33: supervise every managed headless launch by default. Only live
+  // outcomes (0 = ready, 2 = alive but blocked/launching) get subscriptions;
+  // a spawn failure killed its corpses and has nothing to watch.
+  const supervisionWanted =
+    preset.headless !== false &&
+    supervision !== undefined &&
+    supervision.policy.enabled &&
+    (result.exitCode === 0 || result.exitCode === 2);
+
+  // Defense-in-depth for direct/programmatic callers: the MCP tools gate on
+  // sender identity before reaching here, but a caller that bypasses them
+  // must not silently lose supervision while believing it is on.
+  const supervisionNote =
+    supervisionWanted && launchedBy === undefined
+      ? "supervision skipped: sender identity unresolved, pass sender_name"
+      : undefined;
+
+  // Keyed by hcomName (not array position) so the record mapping below is
+  // structurally safe rather than safe-by-inspection.
+  let installsByKey: Map<string, SubscriptionInstall> | undefined;
+  if (supervisionWanted && launchedBy !== undefined) {
+    installsByKey = new Map();
+    for (const name of hcomNames) {
+      const install = await ensureSupervisionSubscriptions(launchedBy, name, [], execHcom);
+      installsByKey.set(name, {
+        name,
+        subscriptions: install.subscriptions,
+        ...(install.errors.length > 0 ? { errors: install.errors } : {}),
+      });
+    }
+  }
+
   // Record ownership BEFORE branching on the exit code: hcom's exit contract is
   // 0 = ready, 1 = spawn error / launch_failed, 2 = still launching or blocked
   // on user attention (agent alive). A live-but-blocked agent must never be
@@ -579,22 +684,57 @@ export async function launchAgent(
   const expiresAt = preset.ttlMinutes
     ? new Date(Date.now() + preset.ttlMinutes * 60 * 1000).toISOString()
     : undefined;
-  const records = hcomNames.map((hcomName) =>
-    addRecord({
-      workspace,
-      harness: preset.harness,
-      hcomName,
-      batchId: batchId ?? undefined,
-      preset: preset.name,
-      launchMode: preset.headless !== false ? "headless" : "headed",
-      state: classifyLaunchState(result.exitCode),
-      released: false,
-      launchedBy,
-      requireReport,
-      dispatchAt,
-      expiresAt,
-    })
-  );
+  let records: RegistryRecord[];
+  try {
+    records = hcomNames.map((hcomName) => {
+      const install = installsByKey?.get(hcomName);
+      return addRecord({
+        workspace,
+        harness: preset.harness,
+        hcomName,
+        batchId: batchId ?? undefined,
+        preset: preset.name,
+        launchMode: preset.headless !== false ? "headless" : "headed",
+        state: classifyLaunchState(result.exitCode),
+        released: false,
+        launchedBy,
+        requireReport,
+        dispatchAt,
+        expiresAt,
+        ...(supervision && launchedBy && preset.headless !== false
+          ? {
+              supervision: {
+                hub: launchedBy,
+                policy: supervision.policy,
+                // B2: the block is persisted EVEN when policy.enabled is
+                // false or installs failed — an absent block would flip the
+                // sweep's default-closed fallback back ON and invert the
+                // opt-out. Disabled is a state, not an absence.
+                subscriptions: install?.subscriptions ?? [],
+                ...(install?.errors ? { installErrors: install.errors } : {}),
+                baselineAt: dispatchAt,
+              },
+            }
+          : {}),
+      });
+    });
+  } catch (err) {
+    // The subscriptions are already live in hcom but no record references
+    // them — unsubscribe best-effort so they cannot accumulate unbounded,
+    // then surface the original error.
+    if (installsByKey) {
+      await Promise.allSettled(
+        [...installsByKey.values()].flatMap((install) =>
+          install.subscriptions.map((sub) => execHcom(["events", "unsub", sub.subId])),
+        ),
+      );
+    }
+    throw err;
+  }
+
+  const supervisionBlock = installsByKey
+    ? { policy: supervision!.policy, agents: [...installsByKey.values()] }
+    : undefined;
 
   if (result.exitCode === 0) {
     return {
@@ -604,6 +744,8 @@ export async function launchAgent(
       registryId: records[0].id,
       registryIds: records.map((record) => record.id),
       command: `hcom ${args.join(" ")}`,
+      ...(supervisionBlock ? { supervision: supervisionBlock } : {}),
+      ...(supervisionNote ? { supervisionNote } : {}),
       ...(modelNote ? { modelNote } : {}),
       ...(reasoningNote ? { reasoningNote } : {}),
     };
@@ -622,6 +764,8 @@ export async function launchAgent(
       blocked: true,
       reason: `hcom launch exited ${result.exitCode}: agent(s) still launching or blocked on user attention. ` +
         `Recorded as managed_blocked. Inspect with hcom term ${hcomNames.join(" ")}, then retry or stop.`,
+      ...(supervisionBlock ? { supervision: supervisionBlock } : {}),
+      ...(supervisionNote ? { supervisionNote } : {}),
       ...(modelNote ? { modelNote } : {}),
       ...(reasoningNote ? { reasoningNote } : {}),
     };
@@ -833,8 +977,9 @@ export function registerSpawnAndVerifyTool(server: any) {
       ready_timeout_sec: z.number().int().min(1).max(600).optional().describe("Seconds to wait for readiness (default: 60)"),
       on_blocked: z.enum(["report", "rescue"]).optional().describe("What to do when the agent is blocked on user attention (default: report)"),
       ttl_minutes: z.number().int().positive().max(5256000).optional().describe("Ephemeral worker TTL in minutes: the record expires after this and prune expired=true kills + clears it. Overrides the preset's ttlMinutes. No background reaper — enforced lazily at the next list_managed/status/prune."),
+      ...supervisionToolParams(),
     },
-    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked, ttl_minutes, require_report }: {
+    async ({ harness, preset: presetName, model, prompt, tag, dir, workspace, sender_name, reasoning, ready_timeout_sec, on_blocked, ttl_minutes, require_report, supervise, attention_after_sec, escalate_after_sec }: {
       harness: Harness;
       preset?: string;
       model?: string;
@@ -848,6 +993,9 @@ export function registerSpawnAndVerifyTool(server: any) {
       on_blocked?: "report" | "rescue";
       ttl_minutes?: number;
       require_report?: boolean;
+      supervise?: boolean;
+      attention_after_sec?: number;
+      escalate_after_sec?: number;
     }) => {
       const cwd = workspace ?? process.cwd();
       const readyTimeoutSec = ready_timeout_sec ?? 60;
@@ -870,6 +1018,7 @@ export function registerSpawnAndVerifyTool(server: any) {
         }
 
         let resolvedPreset: ResolvedLaunchPreset;
+        let supervisionPolicy: SupervisionPolicy;
         if (presetName) {
           const config = loadMergedConfig(cwd);
           const preset = resolveAgentPreset(config, presetName);
@@ -891,7 +1040,9 @@ export function registerSpawnAndVerifyTool(server: any) {
           if (reasoning) resolvedPreset.reasoning = reasoning;
           if (ttl_minutes) resolvedPreset.ttlMinutes = ttl_minutes;
           resolvedPreset.prompt = prompt ?? resolvedPreset.prompt ?? defaultPromptForHarness(harness);
+          supervisionPolicy = resolveLaunchSupervision(config.supervision, resolvedPreset.supervision, { supervise, attention_after_sec, escalate_after_sec });
         } else {
+          const config = loadMergedConfig(cwd);
           resolvedPreset = {
             name: "adhoc",
             harness,
@@ -905,9 +1056,10 @@ export function registerSpawnAndVerifyTool(server: any) {
             reasoning,
             ttlMinutes: ttl_minutes,
           };
+          supervisionPolicy = resolveLaunchSupervision(config.supervision, undefined, { supervise, attention_after_sec, escalate_after_sec });
         }
 
-        const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, 1, require_report ?? false);
+        const result = await launchAgent(resolvedPreset, { dir: dir ?? resolvedPreset.dir }, cwd, new Map(), callerName, 1, require_report ?? false, { policy: supervisionPolicy });
 
         const outcomes: VerifyOutcome[] = [];
         for (const [index, name] of result.hcomNames.entries()) {

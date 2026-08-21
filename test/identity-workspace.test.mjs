@@ -89,6 +89,8 @@ function mockLifecycleDeps(t, { records, callerName, execHcom }) {
       canonicalizeAgentName: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id)?.base_name ??
         (id.startsWith('@') ? id.slice(1) : id),
+      // unblock.ts now links against watch.js, which needs these.
+      parseHcomJson: JSON.parse,
       execHcom: execHcom,
     },
   });
@@ -96,6 +98,8 @@ function mockLifecycleDeps(t, { records, callerName, execHcom }) {
     namedExports: {
       getOwnedRecordsByWorkspace: () => records,
       updateRecordState: () => null,
+      // watch.js (pulled in by unblock.ts) links against this.
+      resolveRootLauncher: (record) => record.launchedBy,
     },
   });
 }
@@ -244,6 +248,7 @@ test('inspect resolves a tag-prefixed display name to the live record', async (t
         throw new Error(`unexpected args: ${args.join(' ')}`);
       },
       parseHcomJson: JSON.parse,
+      resolveCallerName: async () => undefined,
     },
   });
   t.mock.module('../dist/registry.js', {
@@ -370,6 +375,7 @@ test('list_all accepts a workspace param and resolves records against it', async
       findLiveAgentByIdentifier: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id) ?? null,
       parseHcomJson: JSON.parse,
+      resolveCallerName: async () => undefined,
       execHcom: async () => ({ exitCode: 0, stdout: 'hcom 0.0.0', stderr: '' }),
     },
   });
@@ -385,7 +391,8 @@ test('list_all accepts a workspace param and resolves records against it', async
       matchLiveAgent: () => null,
       persistReconciledState: () => {},
       reconcileManagedRecords: (records) => records,
-      reconcileWorkspaceRecords: async () => [],
+      reconcileGlobalRecords: async () => ({ records: [], transitions: [], liveAgents: [], stoppedNames: [] }),
+      resolveRootLauncher: (record) => record.launchedBy,
     },
   });
 
