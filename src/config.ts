@@ -7,6 +7,7 @@ import {
   GlobalConfigSchema,
   GlobalConfigInputSchema,
   RescueAllowlistSchema,
+  SupervisionPolicySchema,
   WorkspaceConfigSchema,
   WorkspaceConfigInputSchema,
   MergedConfigSchema,
@@ -59,6 +60,9 @@ function normalizeGlobalConfig(input: GlobalConfigInput): GlobalConfig {
     agentPresets: normalizeAgentPresets(input.agentPresets),
     topologyPresets: input.topologyPresets,
     rescueAllowlist: input.rescueAllowlist,
+    // Zod fills the built-in policy defaults (enabled, 180s, 360s) for any
+    // field the config file left unset.
+    supervision: input.supervision,
   });
 }
 
@@ -75,6 +79,7 @@ export function loadGlobalConfig(cwd: string): GlobalConfig {
     agentPresets: {},
     topologyPresets: {},
     rescueAllowlist: RescueAllowlistSchema.parse({}),
+    supervision: SupervisionPolicySchema.parse({}),
   };
 
   if (existsSync(GLOBAL_CONFIG_PATH)) {
@@ -144,6 +149,9 @@ export function mergeConfigs(
         ...(workspace.rescueAllowlist?.patterns ?? []),
       ])),
     },
+    // Supervision defaults come from the global config; per-preset and
+    // per-launch overrides resolve at launch time (see supervision.ts).
+    supervision: global.supervision,
   });
 }
 
