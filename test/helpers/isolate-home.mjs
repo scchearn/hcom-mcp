@@ -6,6 +6,12 @@
 // which are resolved at import time — land under a throwaway root. No test
 // can reach the real ~/.hcom/mcp state through homedir(); if the redirect
 // ever fails to take effect, the worker dies loudly instead of leaking.
+//
+// ponytail: coverage ceiling — this preload runs only when wired via --import,
+// i.e. `npm test`. A bare `node --test test/foo.test.mjs` bypasses it, and the
+// guard test file cannot fire for workers it does not run in. Upgrade path:
+// resolve REGISTRY_DIR lazily in src/registry.ts so isolation no longer
+// depends on winning the race against import order.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -22,10 +28,6 @@ if (homedir() !== tempHome) {
   );
 }
 
-// ponytail: this preload covers `npm test` only — a bare
-// `node --test test/foo.test.mjs` bypasses it and the guard file cannot fire.
-// Upgrade path: resolve REGISTRY_DIR lazily in src/registry.ts so isolation no
-// longer depends on winning the race against import order.
 process.on("exit", () => {
   try {
     rmSync(tempHome, { recursive: true, force: true });

@@ -3,7 +3,7 @@
 // being loaded via --import before this worker's module graph.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -37,13 +37,10 @@ test("REGISTRY_PATH resolves under the per-worker temp home, never the real home
 });
 
 test("a full addRecord cycle writes only inside the temp root", async (t) => {
-  // Canary on the real path itself: survives a future code path that derives
-  // its own path instead of using REGISTRY_PATH (the shape of the original bug).
-  const sig = (s) => (s ? `${s.size}:${s.mtimeMs}` : "absent");
-  const before = existsSync(isolation.realRegistryPath)
-    ? statSync(isolation.realRegistryPath)
-    : null;
-
+  // Content canary on the real path itself: survives a future code path that
+  // derives its own path instead of using REGISTRY_PATH (the shape of the
+  // original bug). Content, not mtime — immune to concurrent legitimate
+  // launches appending to the real registry while the suite runs.
   const registryModule = await import(`../dist/registry.js?guard-write-${Date.now()}`);
   const record = registryModule.addRecord({
     workspace: join(isolation.tempHome, "ws"),
@@ -62,12 +59,11 @@ test("a full addRecord cycle writes only inside the temp root", async (t) => {
   );
   assert.ok(parsed.records.some((r) => r.id === record.id));
 
-  const after = existsSync(isolation.realRegistryPath)
-    ? statSync(isolation.realRegistryPath)
-    : null;
-  assert.equal(
-    sig(after),
-    sig(before),
-    `real registry changed during the addRecord cycle: ${isolation.realRegistryPath}`,
-  );
+  if (existsSync(isolation.realRegistryPath)) {
+    const raw = readFileSync(isolation.realRegistryPath, "utf-8");
+    assert.ok(
+      !raw.includes(record.id),
+      `real registry contains the record written by this test: ${isolation.realRegistryPath}`,
+    );
+  }
 });
