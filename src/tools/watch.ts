@@ -8,6 +8,7 @@ import {
   resolveCallerName,
 } from "../hcom.js";
 import { getOwnedRecordsByWorkspace, resolveRootLauncher } from "../registry.js";
+import { installSubscription } from "../supervision.js";
 import type { HcomAgent, RegistryRecord } from "../types.js";
 import { E_INTERNAL, E_NO_SENDER, internalError, toolError } from "../errors.js";
 import {
@@ -329,18 +330,19 @@ export function registerWatchAgentsTool(server: any) {
             const name = record.hcomName;
             if (!name) continue;
             for (const kind of ["life", "blocked"] as const) {
-              const args =
-                kind === "life"
-                  ? ["events", "sub", "--for", caller, "--agent", name, "--type", "life"]
-                  : ["events", "sub", "--for", caller, "--status", "blocked", "--agent", name];
-              const result = await execHcom(args);
-              const subId = result.stdout.match(/sub-[a-f0-9]+/)?.[0] ?? null;
-              subscriptions.push({
-                agent: name,
-                kind,
-                subId,
-                ...(result.exitCode !== 0 ? { error: result.stderr || result.stdout } : {}),
-              });
+              try {
+                // Shared installer with the supervision lane (#33): one arg
+                // builder, one stdout sub-id parse.
+                const sub = await installSubscription(caller, name, kind, execHcom);
+                subscriptions.push({ agent: name, kind, subId: sub.subId });
+              } catch (err: any) {
+                subscriptions.push({
+                  agent: name,
+                  kind,
+                  subId: null,
+                  ...(err?.message ? { error: String(err.message) } : {}),
+                });
+              }
             }
           }
 

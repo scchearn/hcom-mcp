@@ -6,7 +6,7 @@ import { loadMergedConfig, resolveAgentPreset, resolveTopologyPreset, validateTo
 import { addRecord, removeRecords, updateRecordState, updateRecordVerify } from "../registry.js";
 import { ensureSupervisionSubscriptions, resolveSupervisionPolicy, type SubscriptionInstall } from "../supervision.js";
 import { HARNESS_COMMAND, HarnessEnum } from "../types.js";
-import type { AgentPreset, Harness, OwnershipState, SupervisionPolicy, SupervisionPolicyInput } from "../types.js";
+import type { AgentPreset, Harness, OwnershipState, RegistryRecord, SupervisionPolicy, SupervisionPolicyInput } from "../types.js";
 import {
   E_AGENT_NOT_FOUND,
   E_HARNESS_REQUIRED,
@@ -56,6 +56,9 @@ type LaunchResult = {
     policy: SupervisionPolicy;
     agents: SubscriptionInstall[];
   };
+  // Present when supervision was requested but could not be attached —
+  // e.g. a programmatic caller without sender identity. Never silent.
+  supervisionNote?: string;
 };
 
 export type { LaunchResult };
@@ -642,19 +645,31 @@ export async function launchAgent(
   // outcomes (0 = ready, 2 = alive but blocked/launching) get subscriptions;
   // a spawn failure killed its corpses and has nothing to watch. Install
   // BEFORE addRecord so the subscription ids persist in the same write.
-  const supervised =
-    launchedBy !== undefined &&
+  // #33: supervise every managed headless launch by default. Only live
+  // outcomes (0 = ready, 2 = alive but blocked/launching) get subscriptions;
+  // a spawn failure killed its corpses and has nothing to watch.
+  const supervisionWanted =
     preset.headless !== false &&
     supervision !== undefined &&
     supervision.policy.enabled &&
     (result.exitCode === 0 || result.exitCode === 2);
 
-  let installs: SubscriptionInstall[] | undefined;
-  if (supervised) {
-    installs = [];
+  // Defense-in-depth for direct/programmatic callers: the MCP tools gate on
+  // sender identity before reaching here, but a caller that bypasses them
+  // must not silently lose supervision while believing it is on.
+  const supervisionNote =
+    supervisionWanted && launchedBy === undefined
+      ? "supervision skipped: sender identity unresolved, pass sender_name"
+      : undefined;
+
+  // Keyed by hcomName (not array position) so the record mapping below is
+  // structurally safe rather than safe-by-inspection.
+  let installsByKey: Map<string, SubscriptionInstall> | undefined;
+  if (supervisionWanted && launchedBy !== undefined) {
+    installsByKey = new Map();
     for (const name of hcomNames) {
       const install = await ensureSupervisionSubscriptions(launchedBy, name, [], execHcom);
-      installs.push({
+      installsByKey.set(name, {
         name,
         subscriptions: install.subscriptions,
         ...(install.errors.length > 0 ? { errors: install.errors } : {}),
@@ -669,35 +684,56 @@ export async function launchAgent(
   const expiresAt = preset.ttlMinutes
     ? new Date(Date.now() + preset.ttlMinutes * 60 * 1000).toISOString()
     : undefined;
-  const records = hcomNames.map((hcomName, index) =>
-    addRecord({
-      workspace,
-      harness: preset.harness,
-      hcomName,
-      batchId: batchId ?? undefined,
-      preset: preset.name,
-      launchMode: preset.headless !== false ? "headless" : "headed",
-      state: classifyLaunchState(result.exitCode),
-      released: false,
-      launchedBy,
-      requireReport,
-      dispatchAt,
-      expiresAt,
-      ...(supervised && installs
-        ? {
-            supervision: {
-              hub: launchedBy!,
-              policy: supervision!.policy,
-              subscriptions: installs[index].subscriptions,
-              baselineAt: dispatchAt,
-            },
-          }
-        : {}),
-    })
-  );
+  let records: RegistryRecord[];
+  try {
+    records = hcomNames.map((hcomName) => {
+      const install = installsByKey?.get(hcomName);
+      return addRecord({
+        workspace,
+        harness: preset.harness,
+        hcomName,
+        batchId: batchId ?? undefined,
+        preset: preset.name,
+        launchMode: preset.headless !== false ? "headless" : "headed",
+        state: classifyLaunchState(result.exitCode),
+        released: false,
+        launchedBy,
+        requireReport,
+        dispatchAt,
+        expiresAt,
+        ...(install
+          ? {
+              supervision: {
+                hub: launchedBy!,
+                policy: supervision!.policy,
+                subscriptions: install.subscriptions,
+                // Persisted degradation: a short subscriptions array alone
+                // reads as "not installed yet"; installErrors tells the M2
+                // sweep this worker's push lane is down and the watchdog
+                // lane must cover it.
+                ...(install.errors ? { installErrors: install.errors } : {}),
+                baselineAt: dispatchAt,
+              },
+            }
+          : {}),
+      });
+    });
+  } catch (err) {
+    // The subscriptions are already live in hcom but no record references
+    // them — unsubscribe best-effort so they cannot accumulate unbounded,
+    // then surface the original error.
+    if (installsByKey) {
+      await Promise.allSettled(
+        [...installsByKey.values()].flatMap((install) =>
+          install.subscriptions.map((sub) => execHcom(["events", "unsub", sub.subId])),
+        ),
+      );
+    }
+    throw err;
+  }
 
-  const supervisionBlock = installs
-    ? { policy: supervision!.policy, agents: installs }
+  const supervisionBlock = installsByKey
+    ? { policy: supervision!.policy, agents: [...installsByKey.values()] }
     : undefined;
 
   if (result.exitCode === 0) {
@@ -709,6 +745,7 @@ export async function launchAgent(
       registryIds: records.map((record) => record.id),
       command: `hcom ${args.join(" ")}`,
       ...(supervisionBlock ? { supervision: supervisionBlock } : {}),
+      ...(supervisionNote ? { supervisionNote } : {}),
       ...(modelNote ? { modelNote } : {}),
       ...(reasoningNote ? { reasoningNote } : {}),
     };
@@ -728,6 +765,7 @@ export async function launchAgent(
       reason: `hcom launch exited ${result.exitCode}: agent(s) still launching or blocked on user attention. ` +
         `Recorded as managed_blocked. Inspect with hcom term ${hcomNames.join(" ")}, then retry or stop.`,
       ...(supervisionBlock ? { supervision: supervisionBlock } : {}),
+      ...(supervisionNote ? { supervisionNote } : {}),
       ...(modelNote ? { modelNote } : {}),
       ...(reasoningNote ? { reasoningNote } : {}),
     };

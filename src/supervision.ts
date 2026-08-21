@@ -35,6 +35,35 @@ export function resolveSupervisionPolicy(
   }
   return SupervisionPolicySchema.parse(merged);
 }
+export type ExecHcomFn = typeof execHcom;
+
+/**
+ * Install ONE hcom event subscription on behalf of a hub. Single shared
+ * implementation for both consumers (watch_agents subscribe mode and the
+ * launch-time supervision lane) — the arg vectors and the stdout sub-id
+ * parse exist exactly once.
+ *
+ * ponytail: `sub-[a-f0-9]+` matches hcom's CLI stdout, the most drift-prone
+ * input in this codebase. When hcom's output format changes, fix the regex
+ * HERE only; both lanes follow.
+ */
+export async function installSubscription(
+  hub: string,
+  name: string,
+  kind: "life" | "blocked",
+  execHcomFn: ExecHcomFn = execHcom,
+): Promise<SupervisionSubscription> {
+  const args =
+    kind === "life"
+      ? ["events", "sub", "--for", hub, "--agent", name, "--type", "life"]
+      : ["events", "sub", "--for", hub, "--status", "blocked", "--agent", name];
+  const result = await execHcomFn(args);
+  const subId = result.stdout.match(/sub-[a-f0-9]+/)?.[0];
+  if (result.exitCode !== 0 || !subId) {
+    throw new Error(result.stderr || result.stdout || "no subscription id in hcom output");
+  }
+  return { kind, subId };
+}
 
 export interface SubscriptionInstall {
   name: string;
@@ -42,19 +71,20 @@ export interface SubscriptionInstall {
   // Non-fatal install failures. A launch stays successful when a
   // subscription could not be created: the push lane degrades but the
   // record still carries policy + baseline, so the M2 watchdog sweep still
-  // covers silence detection.
+  // covers silence detection. Errors are persisted onto the record's
+  // installErrors so the sweep can see the degraded push lane.
   errors?: string[];
 }
 
 /**
  * Install the #33 push-lane subscriptions for one worker on behalf of its
  * launching hub: lifecycle milestones (`life`: ready/stopped/lost/launch
- * failure) and `blocked` approval-required state. Idempotent per kind — a
- * kind already carrying a subscription id is never installed twice, so
- * rehydration (M4) can call this again without duplicating.
+ * failure) and `blocked` approval-required state.
  *
- * Reuses the same `hcom events sub --for <hub>` mechanism as
- * watch_agents subscribe mode.
+ * Idempotent per kind WITHIN A SESSION: a kind already carrying an id is
+ * skipped. Stored ids are NOT revalidated against hcom — a subscription
+ * hcom dropped leaves this a no-op, so rehydration (M4) must verify or
+ * reinstall explicitly rather than relying on this check.
  */
 export async function ensureSupervisionSubscriptions(
   hub: string,
@@ -63,25 +93,17 @@ export async function ensureSupervisionSubscriptions(
   // Dependency injection: callers pass their own execHcom binding so tests
   // (and future sweep contexts) never depend on this module's load-time
   // binding — the same pattern as gateLaunch's execHcomFn.
-  execHcomFn: typeof execHcom = execHcom,
+  execHcomFn: ExecHcomFn = execHcom,
 ): Promise<{ subscriptions: SupervisionSubscription[]; errors: string[] }> {
   const subscriptions = [...existing];
   const errors: string[] = [];
 
   for (const kind of ["life", "blocked"] as const) {
     if (subscriptions.some((sub) => sub.kind === kind)) continue;
-    const args =
-      kind === "life"
-        ? ["events", "sub", "--for", hub, "--agent", name, "--type", "life"]
-        : ["events", "sub", "--for", hub, "--status", "blocked", "--agent", name];
-    const result = await execHcomFn(args);
-    const subId = result.stdout.match(/sub-[a-f0-9]+/)?.[0];
-    if (result.exitCode === 0 && subId) {
-      subscriptions.push({ kind, subId });
-    } else {
-      errors.push(
-        `${kind}: ${result.stderr || result.stdout || "no subscription id in hcom output"}`,
-      );
+    try {
+      subscriptions.push(await installSubscription(hub, name, kind, execHcomFn));
+    } catch (err: any) {
+      errors.push(`${kind}: ${err?.message ?? err}`);
     }
   }
 

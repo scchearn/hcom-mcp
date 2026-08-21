@@ -577,6 +577,10 @@ export function persistReconciledState(before: RegistryRecord[], after: Registry
  * resumedFrom links (record id for resumes, hcom name for forks) back to
  * the origin record and return ITS launchedBy. Ambiguous or missing links
  * stop the walk early (conservative); cycles are broken by a visited set.
+ *
+ * ponytail: O(records) scans per hop, called per record from the view paths
+ * — O(records²) worst case, still milliseconds at today's fleet and chain
+ * depth 0-2. Hoist a Map<id|name, record> index if chains or fleet size grow.
  */
 export function resolveRootLauncher(
   record: Pick<RegistryRecord, "id" | "launchedBy" | "resumedFrom">,

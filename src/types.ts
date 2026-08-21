@@ -84,11 +84,18 @@ export const SupervisionPolicyInputSchema = z.object({
 });
 export type SupervisionPolicyInput = z.infer<typeof SupervisionPolicyInputSchema>;
 
-export const SupervisionPolicySchema = z.object({
-  enabled: z.boolean().default(true),
-  attentionAfterSec: z.number().int().positive().default(180),
-  escalateAfterSec: z.number().int().positive().default(360),
-});
+export const SupervisionPolicySchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    attentionAfterSec: z.number().int().positive().default(180),
+    escalateAfterSec: z.number().int().positive().default(360),
+  })
+  // Ordering is semantic (#33: alert at three minutes, escalation at six
+  // total). Every layer parses through this schema, so a nonsense config
+  // (escalation before the first alert) is rejected wherever it is set.
+  .refine((policy) => policy.escalateAfterSec > policy.attentionAfterSec, {
+    message: "escalateAfterSec must exceed attentionAfterSec",
+  });
 export type SupervisionPolicy = z.infer<typeof SupervisionPolicySchema>;
 
 // One installed hcom event subscription on behalf of the launching hub.
@@ -111,6 +118,12 @@ export const SupervisionStateSchema = z.object({
   policy: SupervisionPolicySchema,
   // Installed subscription ids, keyed by kind, for dedupe and cleanup.
   subscriptions: z.array(SupervisionSubscriptionSchema).default([]),
+  // Kinds whose installation failed at launch time. A shorter
+  // subscriptions array alone is indistinguishable from "not installed
+  // yet"; this makes a degraded push lane visible to the M2 sweep, which
+  // reads records — not launch responses — and must lean harder on the
+  // watchdog lane for this worker.
+  installErrors: z.array(z.string()).optional(),
   // Silence baseline: the dispatch timestamp supervision measures from.
   baselineAt: z.string(),
 });

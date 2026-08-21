@@ -388,3 +388,140 @@ test('ensureSupervisionSubscriptions is idempotent per kind', async (t) => {
   assert.equal(result2.errors.length, 0);
   assert.equal(result2.subscriptions.length, 2);
 });
+
+// --- review hardening (gimu M1 gate) ---
+
+test('policy invariant: escalation at or before the first alert is rejected at every layer', async (t) => {
+  t.mock.module('node:os', { namedExports: { homedir: () => HOME } });
+  const { resolveSupervisionPolicy } = await import(`../dist/supervision.js?m1-${++importCounter}`);
+
+  // Merged layers that would put escalation before the first alert throw.
+  assert.throws(
+    () => resolveSupervisionPolicy({ attentionAfterSec: 180 }, { escalateAfterSec: 60 }),
+    /escalateAfterSec must exceed attentionAfterSec/,
+  );
+
+  // The global config layer parses through the same schema.
+  seedRegistry([]);
+  realFs.mkdirSync(join(HOME, '.hcom', 'mcp'), { recursive: true });
+  writeFileSync(
+    join(HOME, '.hcom', 'mcp', 'config.json'),
+    JSON.stringify({ supervision: { attentionAfterSec: 300, escalateAfterSec: 120 } }),
+    'utf-8',
+  );
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (override) => override,
+      execHcom: async () => ({ exitCode: 0, stdout: LAUNCH_OK, stderr: '' }),
+      findLiveAgentByIdentifier: () => null,
+      listHcomAgents: async () => [],
+      listStoppedAgentNames: async () => [],
+      listHarnessModels: async () => [{ harness: 'claude', status: 'live', source: 'mock', models: ['sonnet'], count: 1 }],
+    },
+  });
+  const { registerLaunchTool } = await loadLaunchModule();
+  const server = createFakeServer();
+  registerLaunchTool(server);
+  const response = await server.handlers.get('launch')({
+    harness: 'claude',
+    model: 'sonnet',
+    sender_name: 'nora',
+  });
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /escalateAfterSec must exceed attentionAfterSec/);
+  rmSync(join(HOME, '.hcom', 'mcp', 'config.json'), { force: true });
+});
+
+test('a programmatic launch without sender identity surfaces a supervisionNote instead of skipping silently', async (t) => {
+  t.mock.module('node:os', { namedExports: { homedir: () => HOME } });
+  const calls = [];
+  mockHcom(t, {
+    execHcom: async (args) => {
+      calls.push(args);
+      return { exitCode: 0, stdout: LAUNCH_OK, stderr: '' };
+    },
+  });
+  mockConfig(t, {});
+  seedRegistry([]);
+
+  const { launchAgent } = await loadLaunchModule();
+  const result = await launchAgent(
+    { name: 'adhoc', harness: 'claude', model: 'sonnet', headless: true, pty: false, tag: 'claude' },
+    {},
+    '/repo',
+    new Map(),
+    undefined, // no launchedBy
+    1,
+    false,
+    { policy: { enabled: true, attentionAfterSec: 180, escalateAfterSec: 360 } },
+  );
+
+  assert.match(result.supervisionNote, /supervision skipped.*sender_name/);
+  assert.equal(result.supervision, undefined);
+  assert.equal(calls.filter((a) => a[0] === 'events' && a[1] === 'sub').length, 0);
+});
+
+test('install failures persist installErrors on the record so the sweep sees the degraded push lane', async (t) => {
+  t.mock.module('node:os', { namedExports: { homedir: () => HOME } });
+  mockHcom(t, {
+    execHcom: async (args) => {
+      if (args[0] === 'events' && args[1] === 'sub') {
+        return { exitCode: 1, stdout: '', stderr: 'hcom sub failed' };
+      }
+      return { exitCode: 0, stdout: LAUNCH_OK, stderr: '' };
+    },
+  });
+  mockConfig(t, {});
+  seedRegistry([]);
+
+  const { registerLaunchTool } = await loadLaunchModule();
+  const server = createFakeServer();
+  registerLaunchTool(server);
+
+  const response = await server.handlers.get('launch')({
+    harness: 'claude',
+    model: 'sonnet',
+    sender_name: 'nora',
+  });
+  assert.equal(response.isError, undefined);
+  const payload = JSON.parse(response.content[0].text);
+  assert.equal(payload.supervision.agents[0].errors.length, 2);
+
+  const [record] = readRegistry().records;
+  assert.equal(record.supervision.subscriptions.length, 0);
+  assert.equal(record.supervision.installErrors.length, 2);
+  assert.match(record.supervision.installErrors[0], /^life:/);
+});
+
+test('an addRecord failure unsubscribes fresh subscriptions before rethrowing', async (t) => {
+  t.mock.module('node:os', { namedExports: { homedir: () => HOME } });
+  const calls = [];
+  mockHcom(t, {
+    execHcom: async (args) => {
+      calls.push(args);
+      if (args[0] === 'events' && args[1] === 'sub') {
+        return { exitCode: 0, stdout: SUB_OK, stderr: '' };
+      }
+      return { exitCode: 0, stdout: LAUNCH_OK, stderr: '' };
+    },
+  });
+  mockConfig(t, {});
+  // Corrupt registry: addRecord -> loadRegistry throws RegistryError after
+  // quarantining the bad record.
+  realFs.mkdirSync(join(HOME, '.hcom', 'mcp'), { recursive: true });
+  writeFileSync(REGISTRY_PATH(), JSON.stringify({ records: [{ garbage: true }] }), 'utf-8');
+
+  const { registerLaunchTool } = await loadLaunchModule();
+  const server = createFakeServer();
+  registerLaunchTool(server);
+
+  const response = await server.handlers.get('launch')({
+    harness: 'claude',
+    model: 'sonnet',
+    sender_name: 'nora',
+  });
+  assert.equal(response.isError, true);
+  // Both freshly-installed subs were rolled back recordless.
+  const unsubs = calls.filter((a) => a[0] === 'events' && a[1] === 'unsub');
+  assert.deepEqual(unsubs.map((a) => a[2]), ['sub-abc123', 'sub-abc123']);
+});
