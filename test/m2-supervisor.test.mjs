@@ -507,3 +507,71 @@ test('status exposes activeIncidents including undelivered ones', async (t) => {
     deliveryFailed: true,
   }]);
 });
+
+// --- M3: routine lifecycle informs + incident fingerprints ---
+
+test('incident resolution sends exactly one recovered inform', async (t) => {
+  const { evaluateWorker } = await loadSupervisor();
+  const resolved = evaluateWorker({
+    record: makeRecord(),
+    supervision: {
+      ...makeSupervision(),
+      incident: { type: 'stalled_listening', openedAt: iso(BASE + sec(181)), generation: iso(BASE), alertsSent: 1, deliveryFailed: false },
+    },
+    evidence: makeEvidence({ lastActivityAtMs: BASE + sec(400), lastActivityKind: 'report' }),
+    nowMs: BASE + sec(500),
+  });
+  assert.equal(resolved.inform.kind, 'recovered');
+  assert.match(resolved.inform.text, /RECOVERED.*waka/);
+
+  // The next pass sees no incident and no pending inform — quiet.
+  const after = evaluateWorker({
+    record: makeRecord(),
+    supervision: resolved.supervision,
+    evidence: makeEvidence({ lastActivityAtMs: BASE + sec(400), lastActivityKind: 'work' }),
+    nowMs: BASE + sec(600),
+  });
+  assert.equal(after.inform, undefined);
+});
+
+test('a cleanly stopped worker gets one completed inform per stopped episode', async (t) => {
+  const { evaluateWorker } = await loadSupervisor();
+
+  const first = evaluateWorker({
+    record: makeRecord({ state: 'managed_stopped' }),
+    supervision: makeSupervision(),
+    evidence: makeEvidence({ liveAgent: null, outstandingDispatch: false }),
+    nowMs: BASE + sec(30),
+  });
+  assert.equal(first.inform.kind, 'completed');
+  assert.ok(first.supervision.cleanStopInformedAt);
+
+  // Same episode: no repeat.
+  const again = evaluateWorker({
+    record: makeRecord({ state: 'managed_stopped' }),
+    supervision: first.supervision,
+    evidence: makeEvidence({ liveAgent: null, outstandingDispatch: false }),
+    nowMs: BASE + sec(60),
+  });
+  assert.equal(again.inform, undefined);
+
+  // Revival clears the marker; a later stop informs again.
+  const revived = evaluateWorker({
+    record: makeRecord(),
+    supervision: again.supervision,
+    evidence: makeEvidence(),
+    nowMs: BASE + sec(90),
+  });
+  assert.equal(revived.supervision.cleanStopInformedAt, undefined);
+});
+
+test('opened incidents carry the worker:type:generation dedup fingerprint', async (t) => {
+  const { evaluateWorker } = await loadSupervisor();
+  const outcome = evaluateWorker({
+    record: makeRecord(),
+    supervision: makeSupervision(),
+    evidence: makeEvidence(),
+    nowMs: BASE + sec(181),
+  });
+  assert.equal(outcome.supervision.incident.fingerprint, `waka:stalled_listening:${iso(BASE)}`);
+});

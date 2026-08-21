@@ -190,6 +190,9 @@ export function resolveRecordSupervision(record: RegistryRecord): SupervisionSta
 export interface SweepOutcome {
   supervision: SupervisionState;
   notify?: { level: "attention" | "escalation"; text: string };
+  // Routine lifecycle inform (#33): recovered-after-incident and
+  // completed-stopped-cleanly. `inform` intent, once per transition.
+  inform?: { kind: "recovered" | "completed"; text: string };
   tier1?: boolean;
   tier2?: boolean;
 }
@@ -253,10 +256,17 @@ export function evaluateWorker(params: {
   const existing = supervision.incident;
 
   // Resolution first: a newer generation than the open incident's means
-  // meaningful activity resumed — resolve and rebuild silence from it.
+  // meaningful activity resumed — resolve, inform the hub once (recovered),
+  // and rebuild silence from the new activity.
   if (existing && generation !== existing.generation) {
     delete supervision.incident;
-    return { supervision };
+    return {
+      supervision,
+      inform: {
+        kind: "recovered",
+        text: `[RECOVERED] ${record.hcomName ?? record.id}: meaningful activity resumed (${evidence.lastActivityKind ?? "unknown kind"} at ${generation}); incident ${existing.type} resolved.`,
+      },
+    };
   }
 
   // Classification. Immediate types fire regardless of silence; stalled_*
@@ -278,6 +288,29 @@ export function evaluateWorker(params: {
     }
   }
 
+  // Routine lifecycle: completed/stopped cleanly — once per stopped
+  // episode; the marker clears as soon as the agent is live again.
+  if (
+    !type &&
+    !evidence.liveAgent &&
+    (record.state === "managed_stopped" || record.state === "adopted_stopped")
+  ) {
+    if (!supervision.cleanStopInformedAt) {
+      supervision.cleanStopInformedAt = new Date(nowMs).toISOString();
+      return {
+        supervision,
+        inform: {
+          kind: "completed",
+          text: `[COMPLETED] ${record.hcomName ?? record.id}: stopped cleanly with no outstanding report.`,
+        },
+      };
+    }
+    return { supervision };
+  }
+  if (evidence.liveAgent && supervision.cleanStopInformedAt) {
+    delete supervision.cleanStopInformedAt;
+  }
+
   if (!type) {
     return { supervision };
   }
@@ -292,6 +325,8 @@ export function evaluateWorker(params: {
       type,
       openedAt: new Date(nowMs).toISOString(),
       generation,
+      // Dedup fingerprint (#33): worker + type + activity generation.
+      fingerprint: `${record.hcomName ?? record.id}:${type}:${generation}`,
       alertsSent: 0,
       deliveryFailed: false,
     };
@@ -405,6 +440,17 @@ export async function runSupervisionSweep(deps: {
     if (!hadIncident && next.incident) summary.incidentsOpened += 1;
     if (hadIncident && !next.incident) summary.incidentsResolved += 1;
 
+    if (outcome.inform) {
+      const delivered = await deliverNotification(
+        next.hub,
+        next.thread,
+        outcome.inform.text,
+        execHcomFn,
+        "inform",
+      );
+      if (!delivered) summary.alertsFailed += 1;
+    }
+
     if (outcome.notify) {
       const delivered = await deliverNotification(
         next.hub,
@@ -496,11 +542,12 @@ async function deliverNotification(
   thread: string | undefined,
   text: string,
   execHcomFn: ExecHcomFn,
+  intent: "request" | "inform" = "request",
 ): Promise<boolean> {
   if (!hub) return false; // missing hub: retained, surfaced as deliveryFailed
   const args = thread
-    ? ["send", `@${hub}`, "--thread", thread, "--intent", "request", "--", text]
-    : ["send", `@${hub}`, "--intent", "request", "--", text];
+    ? ["send", `@${hub}`, "--thread", thread, "--intent", intent, "--", text]
+    : ["send", `@${hub}`, "--intent", intent, "--", text];
   const result = await execHcomFn(args);
   return result.exitCode === 0;
 }

@@ -131,6 +131,9 @@ export const SupervisionIncidentSchema = z.object({
   // work resumed and resolves the incident; the same generation keeps the
   // alert budget capped (one attention alert, one escalation).
   generation: z.string(),
+  // Dedup fingerprint (#33): worker + incident type + activity generation.
+  // One incident per fingerprint ever alerts more than the two-level budget.
+  fingerprint: z.string().optional(),
   alertsSent: z.number().int().min(0).default(0),
   lastAlertAt: z.string().optional(),
   // True when the last hub notification could not be delivered (missing
@@ -171,6 +174,10 @@ export const SupervisionStateSchema = z.object({
   // Open incident, if any. Absence = healthy (or resolved by newer
   // activity). Persisted BEFORE hub notification per issue #33.
   incident: SupervisionIncidentSchema.optional(),
+  // Routine lifecycle inform (#33): timestamp of the "completed/stopped
+  // cleanly" inform for the CURRENT stopped episode, so it is sent once
+  // per stop; cleared whenever the agent is live again.
+  cleanStopInformedAt: z.string().optional(),
 });
 export type SupervisionState = z.infer<typeof SupervisionStateSchema>;
 
