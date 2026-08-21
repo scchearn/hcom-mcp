@@ -341,11 +341,17 @@ export const HcomAgentSchema = z.object({
   // Evidence fields hcom reports beyond the core shape (#33 supervision):
   // incident diagnostics need the transcript/log locations and launch
   // context without re-parsing raw CLI output later.
-  agent_id: z.string().optional(),
-  background_log_file: z.string().optional(),
-  transcript_path: z.string().optional(),
-  created_at: z.string().optional(),
-  parent_name: z.string().optional(),
+  //
+  // Typed against MEASURED `hcom list --json` output (gimu, 2026-08-21):
+  // agent_id and parent_name are always null; background_log_file and
+  // transcript_path are string-or-null; created_at is epoch seconds as a
+  // FLOAT, not an ISO string — `new Date(agent.created_at)` on the string
+  // overload would silently yield 1970.
+  agent_id: z.string().nullish(),
+  background_log_file: z.string().nullish(),
+  transcript_path: z.string().nullish(),
+  created_at: z.number().optional(),
+  parent_name: z.string().nullish(),
   process_bound: z.boolean().optional(),
   hooks_bound: z.boolean().optional(),
   launch_context: z.record(z.string(), z.unknown()).optional(),
