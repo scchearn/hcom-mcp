@@ -77,29 +77,53 @@ export interface SubscriptionInstall {
 }
 
 /**
+ * Ids of all hcom event subscriptions currently installed, from
+ * `hcom events sub list`. Returns null when the CLI fails so callers can
+ * skip verification rather than misread "no subs" — one call covers every
+ * record in a sweep.
+ */
+export async function listSubscriptionIds(
+  execHcomFn: ExecHcomFn = execHcom,
+): Promise<Set<string> | null> {
+  const result = await execHcomFn(["events", "sub", "list"]);
+  if (result.exitCode !== 0) return null;
+  return new Set([...result.stdout.matchAll(/^(sub-[a-f0-9]+)/gm)].map((m) => m[1]));
+}
+
+/**
  * Install the #33 push-lane subscriptions for one worker on behalf of its
  * launching hub: lifecycle milestones (`life`: ready/stopped/lost/launch
  * failure) and `blocked` approval-required state.
  *
  * Idempotent per kind WITHIN A SESSION: a kind already carrying an id is
- * skipped. Stored ids are NOT revalidated against hcom — a subscription
- * hcom dropped leaves this a no-op, so rehydration (M4) must verify or
- * reinstall explicitly rather than relying on this check.
+ * skipped. Stored ids are NOT revalidated unless the caller passes
+ * `verify` — M4 rehydration passes a checker built from
+ * listSubscriptionIds so subscriptions hcom dropped are reinstalled
+ * exactly once, without duplicating the ones that survived.
  */
 export async function ensureSupervisionSubscriptions(
   hub: string,
   name: string,
   existing: SupervisionSubscription[] = [],
-  // Dependency injection: callers pass their own execHcom binding so tests
-  // (and future sweep contexts) never depend on this module's load-time
-  // binding — the same pattern as gateLaunch's execHcomFn.
   execHcomFn: ExecHcomFn = execHcom,
+  verify?: (subId: string) => Promise<boolean>,
 ): Promise<{ subscriptions: SupervisionSubscription[]; errors: string[] }> {
-  const subscriptions = [...existing];
+  let subscriptions = [...existing];
   const errors: string[] = [];
 
   for (const kind of ["life", "blocked"] as const) {
-    if (subscriptions.some((sub) => sub.kind === kind)) continue;
+    const stored = subscriptions.find((sub) => sub.kind === kind);
+    if (stored) {
+      if (!verify) continue;
+      let alive = false;
+      try {
+        alive = await verify(stored.subId);
+      } catch {
+        alive = true; // verification failure must not cause reinstalls
+      }
+      if (alive) continue;
+      subscriptions = subscriptions.filter((sub) => sub !== stored);
+    }
     try {
       subscriptions.push(await installSubscription(hub, name, kind, execHcomFn));
     } catch (err: any) {

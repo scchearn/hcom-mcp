@@ -1,6 +1,10 @@
 import { execHcom } from "./hcom.js";
 import type { ExecHcomFn } from "./supervision.js";
-import { defaultSupervisionPolicy } from "./supervision.js";
+import {
+  defaultSupervisionPolicy,
+  ensureSupervisionSubscriptions,
+  listSubscriptionIds,
+} from "./supervision.js";
 import {
   eventData,
   eventTimeMs,
@@ -16,6 +20,7 @@ import {
 } from "./tools/watch.js";
 import {
   applySupervisionUpdates,
+  getReleasedSupervisionRecords,
   reconcileGlobalRecords,
 } from "./registry.js";
 import { detectAndAdoptDescendants } from "./descendants.js";
@@ -195,6 +200,10 @@ export interface SweepOutcome {
   inform?: { kind: "recovered" | "completed"; text: string };
   tier1?: boolean;
   tier2?: boolean;
+  // Confirmed terminal state (stopped cleanly / stopped_unreported / lost):
+  // the worker's push-lane subscriptions can never fire again — remove
+  // them (#33 cleanup).
+  cleanupSubscriptions?: boolean;
 }
 
 function incidentText(params: {
@@ -303,9 +312,11 @@ export function evaluateWorker(params: {
           kind: "completed",
           text: `[COMPLETED] ${record.hcomName ?? record.id}: stopped cleanly with no outstanding report.`,
         },
+        cleanupSubscriptions: true,
       };
     }
-    return { supervision };
+    // Already informed for this episode; still confirm cleanup is done.
+    return { supervision, cleanupSubscriptions: supervision.subscriptions.length > 0 };
   }
   if (evidence.liveAgent && supervision.cleanStopInformedAt) {
     delete supervision.cleanStopInformedAt;
@@ -317,6 +328,9 @@ export function evaluateWorker(params: {
 
   const stalled = type === "stalled_active" || type === "stalled_listening";
   const outcome: SweepOutcome = { supervision };
+
+  // Terminal states: nothing to watch anymore — drop the push lane.
+  if (!evidence.liveAgent) outcome.cleanupSubscriptions = true;
 
   if (!existing) {
     // Open: persist-before-notify happens in the driver; this decision just
@@ -420,18 +434,52 @@ export async function runSupervisionSweep(deps: {
   const { records, liveAgents } = await reconcile();
   const nowMs = now();
 
+  // #33 M4 rehydration: one `events sub list` call verifies every stored
+  // subscription id. Kinds hcom dropped are reinstalled exactly once;
+  // surviving ids are never duplicated. Records with NO subscriptions are
+  // left alone — first-time installation stays a launch-time job.
+  const subIds = await listSubscriptionIds(execHcomFn);
+
   // #37: auto-adopt descendants of managed workers BEFORE evaluation so
   // fresh adoptees are swept on the next pass (their silence baseline
   // starts at adoption).
   await detectAndAdoptDescendants({ records, liveAgents, execHcomFn });
 
-  const updates: { id: string; supervision: SupervisionState }[] = [];
+  const updates: { id: string; supervision: SupervisionState | undefined }[] = [];
 
   for (const record of records) {
     const hadIncident = Boolean(record.supervision?.incident);
-    const supervision = resolveRecordSupervision(record);
+    let supervision = resolveRecordSupervision(record);
     if (!supervision) continue;
     summary.evaluated += 1;
+
+    // Rehydration: reinstall only kinds whose stored id hcom no longer has.
+    const terminalState =
+      record.state === 'managed_stopped' ||
+      record.state === 'adopted_stopped' ||
+      record.state === 'managed_lost' ||
+      record.state === 'adopted_lost';
+    if (
+      !terminalState &&
+      subIds &&
+      supervision.subscriptions.length > 0 &&
+      supervision.hub &&
+      supervision.subscriptions.some((sub) => !subIds.has(sub.subId))
+    ) {
+      const alive = supervision.subscriptions.filter((sub) => subIds.has(sub.subId));
+      const res = await ensureSupervisionSubscriptions(
+        supervision.hub,
+        record.hcomName ?? "",
+        alive,
+        execHcomFn,
+        async (subId: string) => Boolean(subIds?.has(subId)),
+      );
+      supervision = {
+        ...supervision,
+        subscriptions: res.subscriptions,
+        ...(res.errors.length > 0 ? { installErrors: res.errors } : {}),
+      };
+    }
 
     const evidence = await fetchWorkerEvidence(record, liveAgents, nowMs, execHcomFn);
     const outcome = evaluateWorker({ record, supervision, evidence, nowMs });
@@ -503,7 +551,34 @@ export async function runSupervisionSweep(deps: {
       };
     }
 
+    // #33 cleanup: confirmed terminal workers lose their push lane — the
+    // subscriptions can never fire again and must not accumulate.
+    if (outcome.cleanupSubscriptions && next.subscriptions.length > 0) {
+      await Promise.allSettled(
+        next.subscriptions.map((sub) => execHcomFn(["events", "unsub", sub.subId])),
+      );
+      next = { ...next, subscriptions: [] };
+    }
+
     updates.push({ id: record.id, supervision: next });
+  }
+
+  // Orphaned-subscription reconciliation, safe subset (#33 cleanup):
+  // RELEASED records keep no push lane — their subscriptions are removed
+  // and the supervision block dropped. Records already deleted (e.g. by
+  // prune) are NOT scanned globally: mass-unsubscribing hcom entities
+  // without a record boundary is a destructive, owner-consent operation.
+  const released = getReleasedSupervisionRecords();
+  for (const record of released) {
+    if (record.supervision && record.supervision.subscriptions.length > 0) {
+      await Promise.allSettled(
+        record.supervision.subscriptions.map((sub) => execHcomFn(["events", "unsub", sub.subId])),
+      );
+    }
+    updates.push({
+      id: record.id,
+      supervision: record.supervision ? withoutIncident({ ...record.supervision, subscriptions: [] }) : record.supervision,
+    });
   }
 
   applySupervisionUpdates(updates);
@@ -535,6 +610,13 @@ async function runTier2Wake(record: RegistryRecord, execHcomFn: ExecHcomFn): Pro
   return rescue.ok
     ? `tier2 wake injected (${rescue.state ?? "unknown"} after recheck)`
     : `tier2 refused or failed: ${rescue.text.slice(0, 200)}`;
+}
+
+/** Shallow copy without the open incident (optional field, delete-safe). */
+function withoutIncident(supervision: SupervisionState): SupervisionState {
+  const next = { ...supervision };
+  delete next.incident;
+  return next;
 }
 
 async function deliverNotification(

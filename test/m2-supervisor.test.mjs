@@ -272,7 +272,7 @@ function readRegistry() {
   return JSON.parse(readFileSync(REGISTRY_PATH, 'utf-8'));
 }
 
-function mockHcomForSweep(t, { liveAgents, sends, agentEvents = '', inboundEvents = '' }) {
+function mockHcomForSweep(t, { liveAgents, sends, unsubs = [], subList = '', agentEvents = '', inboundEvents = '' }) {
   t.mock.module('../dist/hcom.js', {
     namedExports: {
       resolveCallerName: async (override) => override,
@@ -281,6 +281,7 @@ function mockHcomForSweep(t, { liveAgents, sends, agentEvents = '', inboundEvent
       canonicalizeAgentName: (id, agents) =>
         agents.find((a) => a.name === id || a.base_name === id)?.base_name ?? id,
       parseHcomJson: JSON.parse,
+      inferHarnessFromTool: (tool) => (tool === 'opencode' ? 'opencode' : tool === 'claude' ? 'claude' : null),
       listHcomAgents: async () => liveAgents,
       listStoppedAgentNames: async () => [],
       execHcom: async (args) => {
@@ -289,7 +290,15 @@ function mockHcomForSweep(t, { liveAgents, sends, agentEvents = '', inboundEvent
             ? { exitCode: 0, stdout: '', stderr: '' }
             : { exitCode: 0, stdout: JSON.stringify(liveAgents), stderr: '' };
         }
-        if (args[0] === 'events' && args[1] !== 'sub' && args[1] !== 'unsub') {
+        if (args[0] === 'events' && args[1] === 'sub') {
+          if (args[2] === 'list') return { exitCode: 0, stdout: subList, stderr: '' };
+          return { exitCode: 0, stdout: 'Subscription sub-bea0000 created', stderr: '' };
+        }
+        if (args[0] === 'events' && args[1] === 'unsub') {
+          unsubs.push(args[2]);
+          return { exitCode: 0, stdout: 'Removed', stderr: '' };
+        }
+        if (args[0] === 'events') {
           const isMention = args.includes('--mention');
           return { exitCode: 0, stdout: isMention ? inboundEvents : agentEvents, stderr: '' };
         }
@@ -574,4 +583,138 @@ test('opened incidents carry the worker:type:generation dedup fingerprint', asyn
     nowMs: BASE + sec(181),
   });
   assert.equal(outcome.supervision.incident.fingerprint, `waka:stalled_listening:${iso(BASE)}`);
+});
+
+// --- M4: rehydration, terminal cleanup, orphan reconciliation ---
+
+test('rehydration reinstalls only subscription kinds hcom dropped, without duplicates', async (t) => {
+  const sends = [];
+  const liveAgents = [{ name: 'waka', base_name: 'waka', status: 'listening', status_age_seconds: 5, unread_count: 0, tool: 'claude' }];
+  // hcom still has the blocked sub; the life sub was lost (daemon restart).
+  mockHcomForSweep(t, { liveAgents, sends, subList: 'sub-cafe111 blocked-agent\n' });
+  const seeded = makeRecord({
+    id: 'rec-rehydrate',
+    supervision: makeSupervision({
+      subscriptions: [
+        { kind: 'life', subId: 'sub-gone9999' },
+        { kind: 'blocked', subId: 'sub-cafe111' },
+      ],
+    }),
+  });
+  seedRegistry([seeded]);
+
+  const { runSupervisionSweep } = await loadSupervisor();
+  await runSupervisionSweep({
+    now: () => BASE + sec(10),
+    reconcile: async () => ({ records: [seeded], liveAgents }),
+  });
+
+  const [record] = readRegistry().records;
+  const kinds = record.supervision.subscriptions.map((s) => s.kind).sort();
+  assert.deepEqual(kinds, ['blocked', 'life']);
+  assert.equal(record.supervision.subscriptions.find((s) => s.kind === 'blocked').subId, 'sub-cafe111');
+  assert.equal(record.supervision.subscriptions.find((s) => s.kind === 'life').subId, 'sub-bea0000');
+});
+
+test('a restart does not duplicate alerts: persisted budget survives a fresh module instance', async (t) => {
+  const sends = [];
+  const liveAgents = [{ name: 'waka', base_name: 'waka', status: 'listening', status_age_seconds: 400, unread_count: 1, tool: 'claude' }];
+  mockHcomForSweep(t, { liveAgents, sends });
+
+  // Incident opened pre-restart with the attention alert already delivered.
+  const seeded = makeRecord({
+    id: 'rec-restart',
+    supervision: makeSupervision({
+      incident: {
+        type: 'stalled_listening',
+        openedAt: iso(BASE + sec(181)),
+        generation: iso(BASE),
+        alertsSent: 1,
+        deliveryFailed: false,
+        fingerprint: `waka:stalled_listening:${iso(BASE)}`,
+      },
+    }),
+  });
+  seedRegistry([seeded]);
+
+  // Fresh module instance = simulated MCP restart.
+  const { runSupervisionSweep } = await loadSupervisor();
+  const summary = await runSupervisionSweep({
+    now: () => BASE + sec(300), // past attention, before escalation
+    reconcile: async () => ({ records: [seeded], liveAgents }),
+  });
+
+  assert.equal(summary.alertsSent, 0);
+  assert.ok(!sends.some((a) => a[1] === '@nora'));
+  const [record] = readRegistry().records;
+  assert.equal(record.supervision.incident.alertsSent, 1);
+});
+
+test('confirmed terminal workers are unsubscribed and their push lane cleared', async (t) => {
+  const sends = [];
+  const unsubs = [];
+  mockHcomForSweep(t, { liveAgents: [], sends, unsubs });
+  seedRegistry([
+    makeRecord({
+      id: 'rec-terminal',
+      state: 'managed_stopped',
+      supervision: makeSupervision({
+        subscriptions: [
+          { kind: 'life', subId: 'sub-life777' },
+          { kind: 'blocked', subId: 'sub-blk8888' },
+        ],
+      }),
+    }),
+  ]);
+
+  const { runSupervisionSweep } = await loadSupervisor();
+  const psummary = await runSupervisionSweep({
+    now: () => BASE + sec(30),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents: [] }),
+  });
+  assert.deepEqual(unsubs.sort(), ['sub-blk8888', 'sub-life777']);
+  const [record] = readRegistry().records;
+  assert.deepEqual(record.supervision.subscriptions, []);
+  // The completed inform went out once for this episode.
+  assert.ok(sends.some((a) => a[1] === '@nora' && a.join(' ').includes('COMPLETED')));
+});
+
+test('released records are reconciled: subscriptions removed, incident closed', async (t) => {
+  const sends = [];
+  const unsubs = [];
+  mockHcomForSweep(t, { liveAgents: [], sends, unsubs });
+  seedRegistry([
+    makeRecord({
+      id: 'rec-released',
+      released: true,
+      state: 'managed_released',
+      supervision: makeSupervision({
+        subscriptions: [{ kind: 'life', subId: 'sub-orphan99' }],
+        incident: { type: 'lost', openedAt: iso(BASE), generation: iso(BASE), alertsSent: 1, deliveryFailed: false },
+      }),
+    }),
+  ]);
+
+  const { runSupervisionSweep } = await loadSupervisor();
+  await runSupervisionSweep({
+    now: () => BASE + sec(30),
+    reconcile: async () => ({ records: [], liveAgents: [] }),
+  });
+
+  assert.deepEqual(unsubs, ['sub-orphan99']);
+  const [record] = readRegistry().records;
+  assert.deepEqual(record.supervision.subscriptions, []);
+  assert.equal(record.supervision.incident, undefined);
+});
+
+test('OpenCode wedge evidence is reflected in incident diagnostics', async (t) => {
+  const { evaluateWorker } = await loadSupervisor();
+  const outcome = evaluateWorker({
+    record: makeRecord({ harness: 'opencode' }),
+    supervision: makeSupervision(),
+    evidence: makeEvidence({ wedgedQueue: true }),
+    nowMs: BASE + sec(181),
+  });
+  assert.equal(outcome.supervision.incident.type, 'stalled_listening');
+  assert.match(outcome.notify.text, /wedged_queue evidence/);
 });

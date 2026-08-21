@@ -634,6 +634,18 @@ export function applySupervisionUpdates(
 }
 
 /**
+ * Released records that still carry a supervision block with subscriptions
+ * — the safe subset of orphaned-subscription reconciliation (#33): their
+ * push lanes can never fire again and are removed by the sweep.
+ */
+export function getReleasedSupervisionRecords(): RegistryRecord[] {
+  const registry = loadRegistry();
+  return registry.records.filter(
+    (r) => r.released && r.supervision && r.supervision.subscriptions.length > 0,
+  );
+}
+
+/**
  * Reconcile EVERY non-released owned record against live hcom state,
  * regardless of workspace, and persist any state transitions in one batched
  * write.
