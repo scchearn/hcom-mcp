@@ -312,12 +312,15 @@ export function getActiveRecords(workspace: string): RegistryRecord[] {
 /**
  * Create an adopted record for an existing hcom agent.
  * Adopted records have preset "adopted", state "adopted_active", and no launch metadata.
+ * `launchedBy` (#37 auto-adopt) records the root launcher's hub so
+ * supervision notifications route correctly for adopted descendants.
  */
 export function adoptRecord(params: {
   workspace: string;
   harness: Harness;
   hcomName: string;
   sessionId?: string;
+  launchedBy?: string;
 }): RegistryRecord {
   const registry = loadRegistry();
   const now = new Date().toISOString();
@@ -330,7 +333,7 @@ export function adoptRecord(params: {
     preset: "adopted",
     state: "adopted_active",
     // Adopted records have no launch metadata
-    launchedBy: undefined,
+    launchedBy: params.launchedBy,
     topology: undefined,
     topologyRole: undefined,
     createdAt: now,

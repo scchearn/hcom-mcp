@@ -18,6 +18,7 @@ import {
   applySupervisionUpdates,
   reconcileGlobalRecords,
 } from "./registry.js";
+import { detectAndAdoptDescendants } from "./descendants.js";
 import type {
   HcomAgent,
   RegistryRecord,
@@ -383,6 +384,11 @@ export async function runSupervisionSweep(deps: {
   // Live truth first (Phase 0 reuse): one fetch, every owned record settled.
   const { records, liveAgents } = await reconcile();
   const nowMs = now();
+
+  // #37: auto-adopt descendants of managed workers BEFORE evaluation so
+  // fresh adoptees are swept on the next pass (their silence baseline
+  // starts at adoption).
+  await detectAndAdoptDescendants({ records, liveAgents, execHcomFn });
 
   const updates: { id: string; supervision: SupervisionState }[] = [];
 
