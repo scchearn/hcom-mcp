@@ -180,7 +180,9 @@ test('blocked and lost are immediate and never run rescue tiers', async (t) => {
     evidence: makeEvidence({ liveAgent: null }),
     nowMs: BASE + sec(10),
   });
-  assert.equal(lost.supervision.incident.type, 'lost');
+  // Terminal: closed into lastIncident evidence (m11), not left open.
+  assert.equal(lost.supervision.incident, undefined);
+  assert.equal(lost.supervision.lastIncident.type, 'lost');
   assert.equal(lost.tier1, undefined);
 });
 
@@ -193,7 +195,7 @@ test('a cleanly stopped worker is only an incident when a report was promised', 
     evidence: makeEvidence({ liveAgent: null }),
     nowMs: BASE + sec(10),
   });
-  assert.equal(unreported.supervision.incident.type, 'stopped_unreported');
+  assert.equal(unreported.supervision.lastIncident.type, 'stopped_unreported');
 
   const clean = evaluateWorker({
     record: makeRecord({ state: 'managed_stopped', requireReport: false }),
@@ -284,7 +286,7 @@ function readRegistry() {
   return JSON.parse(readFileSync(REGISTRY_PATH, 'utf-8'));
 }
 
-function mockHcomForSweep(t, { liveAgents, sends, unsubs = [], subList = '', agentEvents = '', inboundEvents = '' }) {
+function mockHcomForSweep(t, { liveAgents, sends, unsubs = [], subList = '', lifeEvents = '', messageEvents = '', statusEvents = '', inboundEvents = '' }) {
   t.mock.module('../dist/hcom.js', {
     namedExports: {
       resolveCallerName: async (override) => override,
@@ -311,8 +313,12 @@ function mockHcomForSweep(t, { liveAgents, sends, unsubs = [], subList = '', age
           return { exitCode: 0, stdout: 'Removed', stderr: '' };
         }
         if (args[0] === 'events') {
-          const isMention = args.includes('--mention');
-          return { exitCode: 0, stdout: isMention ? inboundEvents : agentEvents, stderr: '' };
+          if (args.includes('--mention')) return { exitCode: 0, stdout: inboundEvents, stderr: '' };
+          const typeIdx = args.indexOf('--type');
+          const bucket = typeIdx !== -1
+            ? { life: lifeEvents, message: messageEvents, status: statusEvents }[args[typeIdx + 1]] ?? ''
+            : '';
+          return { exitCode: 0, stdout: bucket, stderr: '' };
         }
         if (args[0] === 'send') {
           sends.push(args);
@@ -381,7 +387,7 @@ test('sweep resolves an incident when meaningful activity appears, and retains u
   mockHcomForSweep(t, {
     liveAgents: [{ name: 'waka', base_name: 'waka', status: 'listening', status_age_seconds: 5, unread_count: 0, tool: 'claude' }],
     sends,
-    agentEvents: reportEvent,
+    messageEvents: reportEvent,
   });
 
   // Pre-existing incident from an older generation.

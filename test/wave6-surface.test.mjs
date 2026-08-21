@@ -677,6 +677,9 @@ test('watch_agents poll returns camelCase keys and subscribe returns subId', asy
         if (args[0] === 'events' && args.includes('--type') && args.includes('life')) {
           return { exitCode: 0, stdout: '{"action":"ready"}\n', stderr: '' };
         }
+        if (args[0] === 'events' && args.includes('--type') && args.includes('status')) {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
         if (args[0] === 'events' && args.includes('--type') && args.includes('message')) {
           if (args[args.length - 1] === 'sile') {
             return { exitCode: 0, stdout: '{"from":"sile","text":"done"}\n', stderr: '' };

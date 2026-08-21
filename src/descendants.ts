@@ -31,8 +31,8 @@ export interface DescendantAdoption {
   hub: string | null;
 }
 
-function extractBatchLaunches(events: HcomEvent[]): { by: string; instances: string[] }[] {
-  const launches: { by: string; instances: string[] }[] = [];
+function extractBatchLaunches(events: HcomEvent[]): { by: string; instances: string[]; atMs: number | null }[] {
+  const launches: { by: string; instances: string[]; atMs: number | null }[] = [];
   for (const event of events) {
     const data = eventData(event);
     if (data.action !== "batch_launched") continue;
@@ -41,7 +41,7 @@ function extractBatchLaunches(events: HcomEvent[]): { by: string; instances: str
       ? data.instances.filter((i): i is string => typeof i === "string")
       : [];
     if (!by || instances.length === 0 || by === "user") continue;
-    launches.push({ by, instances });
+    launches.push({ by, instances, atMs: eventTimeMs(event) });
   }
   return launches;
 }
@@ -65,7 +65,12 @@ export async function detectAndAdoptDescendants(deps: {
   for (const record of deps.records) {
     if (record.released || !record.hcomName) continue;
     if (!liveBaseNames.has(record.hcomName)) continue;
-    managedByName.set(record.hcomName, record);
+    // m22: duplicate live names resolve to the NEWEST record — its
+    // createdAt is what gates the recency check.
+    const incumbent = managedByName.get(record.hcomName);
+    if (!incumbent || record.createdAt > incumbent.createdAt) {
+      managedByName.set(record.hcomName, record);
+    }
   }
   if (managedByName.size === 0) return { adopted, skipped };
 
@@ -85,7 +90,7 @@ export async function detectAndAdoptDescendants(deps: {
   }
 
   for (const launch of extractBatchLaunches(events)) {
-    const launchMs = eventTimeMs(events.find((e) => eventData(e).by === launch.by) ?? {});
+    const launchMs = launch.atMs;
     const ancestor = managedByName.get(launch.by);
     if (!ancestor) continue; // spawner is not ours (or not live): leave untracked
     // M7a recency: a spawn predating the ancestor record's creation is a

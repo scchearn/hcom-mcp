@@ -48,11 +48,15 @@ interface ReportEvidence {
  * events" instead of a hard error.
  */
 export async function fetchAgentEvents(name: string, execHcomFn: typeof execHcom = execHcom): Promise<HcomEvent[]> {
-  const [life, message] = await Promise.all([
+  const [life, message, status] = await Promise.all([
     execHcomFn(["events", "--last", "200", "--type", "life", "--agent", name]),
     execHcomFn(["events", "--last", "200", "--type", "message", "--agent", name]),
+    // Status transitions (active work, tool/command/file context) are two
+    // of the five meaningful-activity signals — without this query they
+    // can never fire and every long tool call looks like a stall.
+    execHcomFn(["events", "--last", "200", "--type", "status", "--agent", name]),
   ]);
-  return [life, message]
+  return [life, message, status]
     .filter((result) => result.exitCode === 0)
     .flatMap((result) => parseHcomEvents(result.stdout));
 }

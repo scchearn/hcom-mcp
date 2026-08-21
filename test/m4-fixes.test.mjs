@@ -53,7 +53,7 @@ function makeSupervision(overrides = {}) {
 
 const LIVE = [{ name: 'waka', base_name: 'waka', status: 'listening', status_age_seconds: 400, unread_count: 1, tool: 'claude' }];
 
-function mockHcom(t, { liveAgents = LIVE, sends = [], unsubs = [], subList = '', failState = { fails: false }, agentEvents = '' }) {
+function mockHcom(t, { liveAgents = LIVE, sends = [], unsubs = [], subList = '', failState = { fails: false }, lifeEvents = '', messageEvents = '', statusEvents = '' }) {
   t.mock.module('../dist/hcom.js', {
     namedExports: {
       resolveCallerName: async (o) => o,
@@ -75,7 +75,14 @@ function mockHcom(t, { liveAgents = LIVE, sends = [], unsubs = [], subList = '',
           unsubs.push(args[2]);
           return { exitCode: 0, stdout: 'Removed', stderr: '' };
         }
-        if (args[0] === 'events') return { exitCode: 0, stdout: agentEvents, stderr: '' };
+        if (args[0] === 'events') {
+          // Honor --type: a missing query must show up as missing evidence,
+          // not be silently supplied by a type-blind fixture.
+          const bucket = args.includes('--type')
+            ? { life: lifeEvents, message: messageEvents, status: statusEvents }[args[args.indexOf('--type') + 1]] ?? ''
+            : '';
+          return { exitCode: 0, stdout: bucket, stderr: '' };
+        }
         if (args[0] === 'term') return { exitCode: 0, stdout: JSON.stringify({ lines: ['tail line'] }), stderr: '' };
         if (args[0] === 'send') {
           sends.push(args);
@@ -167,7 +174,7 @@ test('M8 diagnostics: alerts carry recent events, terminal tail, and rescue-atte
   const agentEvents = [
     JSON.stringify({ id: 3, ts: iso(BASE - sec(30)), type: 'status', instance: 'waka', data: { status: 'active', context: 'tool:Bash' } }),
   ].join('\n');
-  mockHcom(t, { sends, agentEvents });
+  mockHcom(t, { sends, statusEvents: agentEvents, messageEvents: JSON.stringify({ id: 4, ts: iso(BASE - sec(20)), type: 'message', instance: 'waka', data: { from: 'nora', intent: 'request', text: 'dispatch text' } }) });
   seedRegistry([makeRecord({ id: 'rec-diag', supervision: undefined })]);
 
   const { runSupervisionSweep } = await loadSupervisor();
@@ -246,4 +253,153 @@ test('adapters: meaningful activity kinds incl. tool context and codex signals',
     }),
     true,
   );
+});
+
+// --- round-2 regressions (ginu) ---
+
+test('MAJOR A: flapping status within one generation alerts once and wakes once', async (t) => {
+  const sends = [];
+  mockHcom(t, { sends });
+  seedRegistry([makeRecord({ id: 'rec-flap', supervision: undefined })]);
+
+  const { runSupervisionSweep } = await loadSupervisor();
+  const run = (status, atMs) => runSupervisionSweep({
+    now: () => atMs,
+    reconcile: async () => ({
+      records: readRegistry().records,
+      liveAgents: [{ name: 'waka', base_name: 'waka', status, status_age_seconds: 400, unread_count: 1, tool: 'claude' }],
+    }),
+  });
+
+  // Open: listening + outstanding -> stalled_listening.
+  await run('listening', BASE + sec(200));
+  let [record] = readRegistry().records;
+  assert.equal(record.supervision.incident.type, 'stalled_listening');
+  assert.equal(record.supervision.incident.alertsSent, 1);
+
+  // Flip to active: material type change mutates IN PLACE — no reopen, no
+  // fresh tier1, no second attention alert inside the same generation.
+  await run('active', BASE + sec(230));
+  [record] = readRegistry().records;
+  assert.equal(record.supervision.incident.type, 'stalled_active');
+  assert.equal(record.supervision.incident.alertsSent, 1);
+  assert.ok(record.supervision.incident.tier1, 'tier1 history carried forward');
+
+  // Flip back to listening: still one generation, still capped.
+  await run('listening', BASE + sec(260));
+  [record] = readRegistry().records;
+  assert.equal(record.supervision.incident.type, 'stalled_listening');
+
+  const hubAlerts = sends.filter((a) => a[1] === '@nora');
+  assert.equal(hubAlerts.length, 1);
+  const wakes = sends.filter((a) => a[1] === '@waka');
+  assert.equal(wakes.length, 1);
+});
+
+test('MAJOR B: tool-context status events reset the generation (no false stall)', async (t) => {
+  // Dispatch at BASE; worker has been running a tool call since BASE+100s.
+  // Without the status query this is 200s of "silence" -> stalled_active.
+  const sends = [];
+  const liveAgents = [{ name: 'waka', base_name: 'waka', status: 'active', status_age_seconds: 100, unread_count: 0, tool: 'claude' }];
+  const statusEvents = JSON.stringify({ id: 7, ts: iso(BASE + sec(100)), type: 'status', instance: 'waka', data: { new_status: 'active', new_context: 'tool:Bash' } });
+  mockHcom(t, { liveAgents, sends, statusEvents });
+  seedRegistry([makeRecord({ id: 'rec-tool', supervision: undefined })]);
+
+  const { runSupervisionSweep } = await loadSupervisor();
+  const summary = await runSupervisionSweep({
+    now: () => BASE + sec(200),
+    reconcile: async () => ({ records: readRegistry().records, liveAgents }),
+  });
+
+  assert.equal(summary.incidentsOpened, 0);
+  assert.deepEqual(sends, []);
+});
+
+test('M5: a dead agent never produces a RECOVERED inform — it classifies lost', async (t) => {
+  const sends = [];
+  mockHcom(t, { liveAgents: [], sends });
+  seedRegistry([
+    makeRecord({
+      id: 'rec-dead',
+      state: 'managed_active',
+      supervision: makeSupervision({
+        incident: {
+          type: 'stalled_listening',
+          openedAt: iso(BASE + sec(181)),
+          generation: iso(BASE + sec(400)), // activity generation newer than baseline
+          alertsSent: 1,
+          deliveryFailed: false,
+        },
+      }),
+    }),
+  ]);
+
+  const { evaluateWorker } = await loadSupervisor();
+  const outcome = evaluateWorker({
+    record: readRegistry().records[0],
+    supervision: readRegistry().records[0].supervision,
+    evidence: { liveAgent: null, lastActivityAtMs: null, lastActivityKind: null, outstandingDispatch: false, wedgedQueue: false, dispatchIntent: null, recentEventsSummary: [] },
+    nowMs: BASE + sec(500),
+  });
+  // No resolution-branch RECOVERED: the agent DIED, it did not recover.
+  assert.equal(outcome.inform, undefined);
+  // Terminal: the lost incident is CLOSED into lastIncident evidence (m11).
+  assert.equal(outcome.supervision.incident, undefined);
+  assert.equal(outcome.supervision.lastIncident.type, 'lost');
+});
+
+test('MAJOR C: a throw during tier2 persists the escalation budget, no double-fire', async (t) => {
+  const sends = [];
+  const liveAgents = [{ name: 'waka', base_name: 'waka', status: 'listening', status_age_seconds: 900, unread_count: 1, tool: 'opencode' }];
+  t.mock.module('../dist/hcom.js', {
+    namedExports: {
+      resolveCallerName: async (o) => o,
+      findLiveAgentByIdentifier: (id, agents) =>
+        agents.find((a) => a.name === id || a.base_name === id) ?? null,
+      canonicalizeAgentName: (id, agents) =>
+        agents.find((a) => a.name === id || a.base_name === id)?.base_name ?? id,
+      parseHcomJson: JSON.parse,
+      inferHarnessFromTool: () => 'opencode',
+      listHcomAgents: async () => {
+        throw new Error('transient hcom list failure');
+      },
+      listStoppedAgentNames: async () => [],
+      execHcom: async (args) => {
+        if (args[0] === 'events' && args[1] === 'sub') return { exitCode: 0, stdout: '', stderr: '' };
+        if (args[0] === 'events') return { exitCode: 0, stdout: '', stderr: '' };
+        if (args[0] === 'send') { sends.push(args); return { exitCode: 0, stdout: 'Sent', stderr: '' }; }
+        throw new Error(`unexpected: ${args.join(' ')}`);
+      },
+    },
+  });
+  seedRegistry([
+    makeRecord({
+      id: 'rec-tier2',
+      harness: 'opencode',
+      supervision: makeSupervision({
+        incident: {
+          type: 'stalled_listening',
+          openedAt: iso(BASE + sec(181)),
+          generation: iso(BASE),
+          alertsSent: 1,
+          deliveryFailed: false,
+          tier1: { at: iso(BASE + sec(181)), outcome: 'tier1 wake sent' },
+          dispatchIntent: 'request',
+        },
+      }),
+    }),
+  ]);
+
+  const { runSupervisionSweep } = await loadSupervisor();
+  // tier2 -> runUnblock -> listHcomAgents throws; the sweep must survive
+  // and persist the escalation bump that already went out.
+  const summary = await runSupervisionSweep({ now: () => BASE + sec(600) });
+  assert.equal(summary.alertsSent, 1);
+
+  const [record] = readRegistry().records;
+  assert.equal(record.supervision.incident.alertsSent, 2);
+  // Next sweep must NOT re-send the escalation (budget spent).
+  const sendsBefore = sends.filter((a) => a[1] === '@nora').length;
+  await runSupervisionSweep({ now: () => BASE + sec(700) });
+  assert.equal(sends.filter((a) => a[1] === '@nora').length, sendsBefore);
 });

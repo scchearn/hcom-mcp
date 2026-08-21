@@ -368,7 +368,7 @@ export function evaluateWorker(params: {
   ) {
     if (!supervision.cleanStopInformedAt) {
       supervision.cleanStopInformedAt = new Date(nowMs).toISOString();
-      const closed = closeIncident(supervision);
+      const closed = closeIncident(supervision, nowMs);
       return {
         supervision: closed,
         inform: {
@@ -380,7 +380,7 @@ export function evaluateWorker(params: {
     }
     // Already informed for this episode; still confirm cleanup is done.
     return {
-      supervision: closeIncident(supervision),
+      supervision: closeIncident(supervision, nowMs),
       cleanupSubscriptions: supervision.subscriptions.length > 0,
     };
   }
@@ -395,17 +395,16 @@ export function evaluateWorker(params: {
   const stalled = type === "stalled_active" || type === "stalled_listening";
   const outcome: SweepOutcome = { supervision };
 
-  // Terminal states: nothing to watch anymore — drop the push lane and
-  // close the incident (retained as lastIncident lifecycle evidence).
+  // Terminal states: nothing to watch anymore — drop the push lane. The
+  // incident itself is closed AFTER the open/reopen logic below so a
+  // material type change (e.g. stalled -> lost) is what gets recorded.
   if (!evidence.liveAgent) {
     outcome.cleanupSubscriptions = true;
-    outcome.supervision = closeIncident(outcome.supervision);
   }
 
-  if (!existing || existing.type !== type) {
-    // Open — or MATERIAL CHANGE (m10): a different incident type on the same
-    // generation reopens with a fresh fingerprint and budget, because the
-    // escalated state differs from what the spent budget described.
+  if (!existing) {
+    // Open: persist-before-notify happens in the driver; this decision just
+    // carries the fresh incident.
     supervision.incident = {
       type,
       openedAt: new Date(nowMs).toISOString(),
@@ -421,14 +420,22 @@ export function evaluateWorker(params: {
       text: incidentText({ record, policy, evidence, incidentType: type, silenceSec, level: "attention" }),
     };
     if (stalled) outcome.tier1 = true;
+    if (outcome.cleanupSubscriptions) {
+      outcome.supervision = closeIncident(outcome.supervision, nowMs);
+    }
     return outcome;
   }
 
-  // Same generation: cap of one attention alert + one escalation alert.
-  // Failed deliveries leave alertsSent unchanged, so the next sweep retries
-  // the same level; deliveryFailed marks the retention that status /
-  // list_managed / watch_agents surface.
+  // Same generation. A MATERIAL TYPE CHANGE (m10/A) mutates the incident in
+  // place — type + fingerprint updated, alert budget and wake history
+  // CARRIED FORWARD — so a flapping status can never mint fresh budgets or
+  // re-fire tier1 inside one generation. Escalation text reports the
+  // current type because it is composed from these fields at send time.
   if (supervision.incident) {
+    if (supervision.incident.type !== type) {
+      supervision.incident.type = type;
+      supervision.incident.fingerprint = `${record.hcomName ?? record.id}:${type}:${generation}`;
+    }
     if (supervision.incident.alertsSent === 0) {
       outcome.notify = {
         level: "attention",
@@ -457,6 +464,12 @@ export function evaluateWorker(params: {
           outcome.tier2 = true;
         }
       }
+    }
+
+    // Terminal close LAST: the recorded incident is the post-reopen one
+    // (a material type change must be what lands in lastIncident).
+    if (outcome.cleanupSubscriptions) {
+      outcome.supervision = closeIncident(outcome.supervision, nowMs);
     }
   }
 
@@ -527,6 +540,10 @@ export async function runSupervisionSweep(deps: {
   // latest state is still persisted — alerts already delivered are never
   // lost to a later throw, so budgets and attempt records stay truthful.
   const evaluateOne = async (record: RegistryRecord): Promise<void> => {
+    // Hoisted so the catch can persist whatever state was computed before a
+    // throw (M4/M-C): budgets and attempt records stay truthful even when
+    // delivery-side code blows up mid-pass.
+    let next: SupervisionState | undefined;
     try {
       const hadIncident = Boolean(record.supervision?.incident);
       let supervision = resolveRecordSupervision(record);
@@ -563,14 +580,17 @@ export async function runSupervisionSweep(deps: {
 
       const evidence = await fetchWorkerEvidence(record, liveAgents, nowMs, execHcomFn);
       const outcome = evaluateWorker({ record, supervision, evidence, nowMs });
-      let next = outcome.supervision;
+      next = outcome.supervision;
 
       if (!hadIncident && next.incident) summary.incidentsOpened += 1;
-      if (hadIncident && !next.incident && !next.lastIncident?.closedAt) summary.incidentsResolved += 1;
+      // m24: a resolution is the RECOVERED transition — cleanup-closes of
+      // terminal workers are lifecycle evidence, not resolutions.
+      if (outcome.inform?.kind === "recovered") summary.incidentsResolved += 1;
 
-      // M3: persist the incident BEFORE any notification goes out, so a
-      // throw during delivery can never lose an alerted incident.
-      if (outcome.notify || outcome.tier1 || outcome.tier2) {
+      // M3: persist the incident BEFORE any notification goes out (m20:
+      // informs included), so a throw during delivery can never lose an
+      // alerted incident or double-fire an inform.
+      if (outcome.notify || outcome.inform || outcome.tier1 || outcome.tier2) {
         applySupervisionUpdates([{ id: record.id, supervision: next }]);
       }
 
@@ -657,6 +677,9 @@ export async function runSupervisionSweep(deps: {
         `[supervision] record ${record.id} (${record.hcomName ?? "?"}) failed:`,
         err?.message ?? err,
       );
+      // Whatever was computed before the throw survives: delivered alerts
+      // keep their budget bumps, attempted tiers keep their records.
+      if (next) updates.push({ id: record.id, supervision: next });
     }
   };
 
@@ -725,10 +748,10 @@ function withoutIncident(supervision: SupervisionState): SupervisionState {
 }
 
 /** Close an open incident: retained as lastIncident evidence (m11). */
-function closeIncident(supervision: SupervisionState): SupervisionState {
+function closeIncident(supervision: SupervisionState, nowMs: number): SupervisionState {
   if (!supervision.incident) return supervision;
   const { incident, ...rest } = supervision;
-  return { ...rest, lastIncident: { ...incident, closedAt: new Date().toISOString() } };
+  return { ...rest, lastIncident: { ...incident, closedAt: new Date(nowMs).toISOString() } };
 }
 
 /** Run async work over items with bounded concurrency, preserving order of results. */
