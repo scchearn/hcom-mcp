@@ -489,6 +489,35 @@ export async function reconcileWorkspaceRecords(workspace: string): Promise<Regi
   return reconciled;
 }
 
+/**
+ * Reconcile EVERY non-released owned record against live hcom state,
+ * regardless of workspace, and persist any state transitions.
+ *
+ * reconcileWorkspaceRecords only heals the workspace a caller happens to
+ * target, so records stranded in deleted worktree workspaces stayed
+ * managed_active forever while hcom reported only a handful of live agents.
+ * This global pass fetches live state once and settles all owned records;
+ * transitions are persisted without touching lastSeenAt, so prune's age
+ * rules stay valid.
+ */
+export async function reconcileGlobalRecords(): Promise<{
+  records: RegistryRecord[];
+  transitions: number;
+}> {
+  const registry = loadRegistry();
+  const owned = registry.records.filter((r) => !r.released);
+  const [hcomAgents, stoppedNames] = await Promise.all([
+    listHcomAgents(),
+    listStoppedAgentNames(),
+  ]);
+  const reconciled = reconcileManagedRecords(owned, hcomAgents, stoppedNames);
+  const transitions = reconciled.filter(
+    (record, index) => record.state !== owned[index].state,
+  ).length;
+  persistReconciledState(owned, reconciled);
+  return { records: reconciled, transitions };
+}
+
 export function persistReconciledState(before: RegistryRecord[], after: RegistryRecord[]) {
   for (const [index, record] of after.entries()) {
     if (record.state !== before[index]?.state) {

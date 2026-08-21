@@ -11,8 +11,8 @@ import {
   getRecordsByWorkspace,
   matchLiveAgent,
   persistReconciledState,
+  reconcileGlobalRecords,
   reconcileManagedRecords,
-  reconcileWorkspaceRecords,
 } from "../registry.js";
 import type { HcomAgent, RegistryRecord } from "../types.js";
 import { E_INTERNAL, internalError } from "../errors.js";
@@ -190,7 +190,12 @@ export function registerStatusTool(server: any) {
         const paths = getConfigPaths(cwd);
         const liveAgents = await listHcomAgents();
         const workspaceRecords = getRecordsByWorkspace(cwd);
-        const reconciled = await reconcileWorkspaceRecords(cwd);
+        // Global reconcile heals every workspace in one pass — records
+        // stranded in dead worktree workspaces used to stay managed_active
+        // forever because no tool call ever targeted those workspaces. The
+        // workspace view is filtered out of the same reconciled set.
+        const { records: reconciledAll, transitions } = await reconcileGlobalRecords();
+        const reconciled = reconciledAll.filter((record) => record.workspace === cwd);
 
         // Full state breakdown across every ownership state, including the
         // stale buckets (adopted_lost is the largest in the wild and was
@@ -214,6 +219,10 @@ export function registerStatusTool(server: any) {
           liveAgentCount: liveAgents.length,
           managedRecordCount: reconciled.length,
           stateBreakdown,
+          // Global reconcile evidence: how many owned records exist across
+          // ALL workspaces and how many states the pass just corrected.
+          globalRecordCount: reconciledAll.length,
+          globalReconcileTransitions: transitions,
           managedLostCount: reconciled.filter((record) => record.state === "managed_lost").length,
           managedReleasedCount: workspaceRecords.filter((record) => record.released).length,
           reportEvidence: reconciled

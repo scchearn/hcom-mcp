@@ -210,13 +210,17 @@ test('status reports the hcom version and the full state breakdown', async (t) =
         { id: 'd', state: 'managed_released', released: true },
       ],
       getOwnedRecordsByWorkspace: () => [],
-      // Reconcile demotes a phantom active record to lost: the breakdown must
-      // reflect the post-reconcile state, not the stale pre-reconcile one.
-      reconcileWorkspaceRecords: async () => [
-        { id: 'a', state: 'managed_lost' },
-        { id: 'b', state: 'adopted_lost' },
-        { id: 'c', state: 'adopted_lost' },
-      ],
+      // Global reconcile returns every owned record across all workspaces;
+      // status filters its workspace view out of this set.
+      reconcileGlobalRecords: async () => ({
+        records: [
+          { id: 'a', workspace: '/repo', state: 'managed_lost' },
+          { id: 'b', workspace: '/repo', state: 'adopted_lost' },
+          { id: 'c', workspace: '/repo', state: 'adopted_lost' },
+          { id: 'stale-w2', workspace: '/repo-w2', state: 'managed_lost' },
+        ],
+        transitions: 1,
+      }),
       matchLiveAgent: () => null,
       persistReconciledState: () => {},
       reconcileManagedRecords: (records) => records,
@@ -259,6 +263,10 @@ test('status reports the hcom version and the full state breakdown', async (t) =
   });
   assert.equal(payload.managedLostCount, 1);
   assert.equal(payload.managedReleasedCount, 1);
+  // Global reconcile evidence: records in other workspaces were healed too,
+  // but only /repo records feed the workspace breakdown.
+  assert.equal(payload.globalRecordCount, 4);
+  assert.equal(payload.globalReconcileTransitions, 1);
 });
 
 test('status reports hcomVersion null when the CLI version check fails', async (t) => {
@@ -274,7 +282,7 @@ test('status reports hcomVersion null when the CLI version check fails', async (
     namedExports: {
       getRecordsByWorkspace: () => [],
       getOwnedRecordsByWorkspace: () => [],
-      reconcileWorkspaceRecords: async () => [],
+      reconcileGlobalRecords: async () => ({ records: [], transitions: 0 }),
       matchLiveAgent: () => null,
       persistReconciledState: () => {},
       reconcileManagedRecords: (records) => records,
@@ -331,7 +339,7 @@ test('status caches the hcom version across calls', async (t) => {
     namedExports: {
       getRecordsByWorkspace: () => [],
       getOwnedRecordsByWorkspace: () => [],
-      reconcileWorkspaceRecords: async () => [],
+      reconcileGlobalRecords: async () => ({ records: [], transitions: 0 }),
       matchLiveAgent: () => null,
       persistReconciledState: () => {},
       reconcileManagedRecords: (records) => records,
