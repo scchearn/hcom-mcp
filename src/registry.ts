@@ -464,8 +464,7 @@ export function reconcileManagedRecords(
     if (record.state === "managed_expired" || record.state === "adopted_expired") {
       const liveAgent = matchLive(record);
       const activeState = record.state === "managed_expired" ? "managed_active" : "adopted_active";
-      const lostState = record.state === "managed_expired" ? "managed_lost" : "adopted_lost";
-      return { ...record, state: (liveAgent ? activeState : lostState) as OwnershipState };
+      return { ...record, state: liveAgent ? (activeState as OwnershipState) : goneState(record, stoppedNames) };
     }
 
     const liveAgent = matchLive(record);
@@ -483,7 +482,7 @@ export function reconcileManagedRecords(
     // still launching. If it is live again, promote to active; if it is gone,
     // demote to lost.
     if (record.state === "managed_blocked") {
-      return { ...record, state: (liveAgent ? "managed_active" : "managed_lost") as OwnershipState };
+      return { ...record, state: liveAgent ? ("managed_active" as OwnershipState) : goneState(record, stoppedNames) };
     }
 
     // Stopped records: keep them stopped when the agent stopped cleanly
@@ -505,18 +504,36 @@ export function reconcileManagedRecords(
       return record;
     }
 
-    // Managed active but not found live → managed_lost
+    // Managed active but not found live → stopped if it stopped cleanly
+    // (present in `hcom list --stopped`, incl. an out-of-band `hcom kill`),
+    // else genuinely lost (#45).
     if (record.state === "managed_active" && !liveAgent) {
-      return { ...record, state: "managed_lost" as const };
+      return { ...record, state: goneState(record, stoppedNames) };
     }
 
-    // Adopted active but not found live → adopted_lost
+    // Adopted active but not found live → stopped-if-clean, else lost (#45)
     if (record.state === "adopted_active" && !liveAgent) {
-      return { ...record, state: "adopted_lost" as const };
+      return { ...record, state: goneState(record, stoppedNames) };
     }
 
     return record;
   });
+}
+
+/**
+ * State for a record whose agent has vanished from the live list. A name
+ * present in `hcom list --stopped` stopped cleanly (`killed by:cli`,
+ * `closed by:pty`, `inactive_cleanup by:system`) and becomes *_stopped;
+ * anything else is genuinely *_lost. Without this, an out-of-band `hcom kill`
+ * demotes managed_active straight to managed_lost and the supervisor pages a
+ * false `lost` incident for a deliberate, successful termination (#45).
+ */
+function goneState(record: RegistryRecord, stoppedNames: string[]): OwnershipState {
+  const adopted = record.state.startsWith("adopted_");
+  if (record.hcomName && stoppedNames.includes(record.hcomName)) {
+    return (adopted ? "adopted_stopped" : "managed_stopped") as OwnershipState;
+  }
+  return (adopted ? "adopted_lost" : "managed_lost") as OwnershipState;
 }
 
 /**
