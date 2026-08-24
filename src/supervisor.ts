@@ -347,6 +347,11 @@ export function evaluateWorker(params: {
   if (!evidence.liveAgent) {
     if (record.state === "managed_stopped" || record.state === "adopted_stopped") {
       type = record.requireReport ? "stopped_unreported" : null;
+    } else if (record.state === "managed_expired" || record.state === "adopted_expired") {
+      // ttl_minutes elapsed: an expected teardown, not a loss. Classifying it
+      // `lost` mints a false incident that retries forever when the owning hub
+      // is gone (#48). Live-but-past-TTL workers still hit the checks below.
+      type = null;
     } else {
       type = "lost";
     }
@@ -386,6 +391,20 @@ export function evaluateWorker(params: {
   }
   if (evidence.liveAgent && supervision.cleanStopInformedAt) {
     delete supervision.cleanStopInformedAt;
+  }
+
+  // Expired-and-gone (#48): retire silently — no [COMPLETED] inform (TTL
+  // workers are fire-and-forget, and a dead hub would only fail delivery),
+  // but still drop the push lane so subscriptions do not accumulate.
+  if (
+    !type &&
+    !evidence.liveAgent &&
+    (record.state === "managed_expired" || record.state === "adopted_expired")
+  ) {
+    return {
+      supervision: closeIncident(supervision, nowMs),
+      cleanupSubscriptions: supervision.subscriptions.length > 0,
+    };
   }
 
   if (!type) {
