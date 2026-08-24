@@ -147,6 +147,33 @@ test('reconcile demotes a stopped record to lost when the agent vanished without
   });
 });
 
+// --- #45: a deliberate out-of-band kill of a managed_active worker must
+// reconcile to *_stopped (clean), never *_lost (which pages a false incident).
+test('reconcile: managed_active gone but present in --stopped becomes managed_stopped, not lost', () => {
+  return import(`../dist/registry.js?${importCounter++}`).then((reg) => {
+    const records = [makeRecord({ id: 'killed-1', state: 'managed_active' })];
+    // 'waka' vanished from live but appears in stoppedNames (killed by:cli).
+    const reconciled = reg.reconcileManagedRecords(records, [], ['waka']);
+    assert.equal(reconciled[0].state, 'managed_stopped');
+  });
+});
+
+test('reconcile: adopted_active gone but present in --stopped becomes adopted_stopped, not lost', () => {
+  return import(`../dist/registry.js?${importCounter++}`).then((reg) => {
+    const records = [makeRecord({ id: 'killed-2', state: 'adopted_active' })];
+    const reconciled = reg.reconcileManagedRecords(records, [], ['waka']);
+    assert.equal(reconciled[0].state, 'adopted_stopped');
+  });
+});
+
+test('reconcile: managed_active gone and NOT in --stopped stays lost (genuine disappearance)', () => {
+  return import(`../dist/registry.js?${importCounter++}`).then((reg) => {
+    const records = [makeRecord({ id: 'gone-1', state: 'managed_active' })];
+    const reconciled = reg.reconcileManagedRecords(records, [], []);
+    assert.equal(reconciled[0].state, 'managed_lost');
+  });
+});
+
 // --- #10: TTL / ephemeral workers ---
 
 test('prune allWorkspaces=true targets records across every workspace', async (t) => {
