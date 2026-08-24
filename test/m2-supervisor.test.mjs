@@ -206,6 +206,41 @@ test('a cleanly stopped worker is only an incident when a report was promised', 
   assert.equal(clean.supervision.incident, undefined);
 });
 
+// #48: a ttl worker that outlived its TTL and is gone is an EXPECTED teardown,
+// not a loss — no incident, no notify, and its push lane is dropped.
+test('an expired-and-gone ttl worker retires silently, never `lost`', async (t) => {
+  const { evaluateWorker } = await loadSupervisor();
+
+  const expired = evaluateWorker({
+    record: makeRecord({ state: 'managed_expired' }),
+    supervision: makeSupervision({ subscriptions: [{ kind: 'life', subId: 'sub-1' }] }),
+    evidence: makeEvidence({ liveAgent: null }),
+    nowMs: BASE + sec(10),
+  });
+  assert.equal(expired.supervision.incident, undefined);
+  assert.equal(expired.notify, undefined);
+  assert.equal(expired.inform, undefined);
+  assert.equal(expired.cleanupSubscriptions, true);
+
+  const adoptedExpired = evaluateWorker({
+    record: makeRecord({ state: 'adopted_expired' }),
+    supervision: makeSupervision(),
+    evidence: makeEvidence({ liveAgent: null }),
+    nowMs: BASE + sec(10),
+  });
+  assert.equal(adoptedExpired.supervision.incident, undefined);
+  assert.equal(adoptedExpired.notify, undefined);
+
+  // Guard the #45/#48 boundary: a genuine active disappearance is still `lost`.
+  const lost = evaluateWorker({
+    record: makeRecord({ state: 'managed_lost' }),
+    supervision: makeSupervision(),
+    evidence: makeEvidence({ liveAgent: null }),
+    nowMs: BASE + sec(10),
+  });
+  assert.equal(lost.supervision.incident.type, 'lost');
+});
+
 test('tier2 becomes eligible one escalation window after tier1, once per generation', async (t) => {
   const { evaluateWorker } = await loadSupervisor();
   const incident = {
